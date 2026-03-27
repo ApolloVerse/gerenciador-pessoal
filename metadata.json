@@ -1,0 +1,5 @@
+{
+  "name": "Gerenciador de IR",
+  "description": "Gerenciador completo para controle de investimentos, preço médio e relatórios consolidados para Imposto de Renda com suporte a impressão e exportação.",
+  "requestFramePermissions": []
+}
