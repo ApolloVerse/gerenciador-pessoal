@@ -1549,6 +1549,36 @@ export default function App() {
 
   // --- Render ---
 
+  if (!supabase) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
+        <Card className="max-w-xl w-full p-8 border-t-4 border-t-red-500 shadow-xl">
+          <div className="flex flex-col items-center text-center space-y-6">
+            <div className="w-16 h-16 bg-red-50 rounded-full flex items-center justify-center">
+              <ShieldCheck className="w-10 h-10 text-red-500" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-black text-slate-800 mb-2">Configuração Necessária</h1>
+              <p className="text-slate-500">O sistema está no ar, mas você ainda não configurou as chaves do banco de dados.</p>
+            </div>
+            
+            <div className="bg-slate-100 p-6 rounded-2xl w-full text-left space-y-4">
+              <p className="text-sm font-bold text-slate-700 uppercase">O que fazer agora:</p>
+              <ol className="text-sm text-slate-600 space-y-2 list-decimal list-inside">
+                <li>Vá no seu painel da **Vercel** ou arquivo **.env**.</li>
+                <li>Adicione as chaves: `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY`.</li>
+                <li>Não esqueça da `VITE_GEMINI_API_KEY` para a IA funcionar.</li>
+                <li>Faça o deploy novamente ou recarregue a página.</li>
+              </ol>
+            </div>
+            
+            <p className="text-xs text-slate-400 italic">Isso evita a "tela branca" e garante que seus dados estejam seguros e persistentes.</p>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
   if (authLoading) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
