@@ -16,6 +16,10 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!supabase) {
+      setError('Configuração do Supabase ausente. Verifique as variáveis de ambiente.');
+      return;
+    }
     setLoading(true);
     setError(null);
 

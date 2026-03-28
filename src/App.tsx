@@ -307,12 +307,21 @@ export default function App() {
 
   // Auth Listener
   useEffect(() => {
+    console.log("Supabase Client Status:", supabase ? "Ready" : "Not Configured");
+    
+    if (!supabase) {
+      setAuthLoading(false);
+      return;
+    }
+    
     supabase.auth.getSession().then(({ data: { session } }) => {
+      console.log("Initial Session Fetch:", session?.user ? "Authenticated" : "Not Authenticated");
       setUser(session?.user ?? null);
       setAuthLoading(false);
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      console.log("Auth State Changed:", _event, session?.user ? "User Present" : "No User");
       setUser(session?.user ?? null);
     });
 
@@ -321,7 +330,7 @@ export default function App() {
 
   // Fetch data from Supabase
   const fetchData = async () => {
-    if (!user) return;
+    if (!user || !supabase) return;
     setSyncLoading(true);
     try {
       const { data: brokers, error: bError } = await supabase.from('brokers').select('*');
@@ -790,6 +799,7 @@ export default function App() {
   // }, [data]);
 
   const handleLogout = async () => {
+    if (!supabase) return;
     await supabase.auth.signOut();
   };
 
