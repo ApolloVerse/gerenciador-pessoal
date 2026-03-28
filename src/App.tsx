@@ -43,10 +43,12 @@ import { format, parseISO, startOfMonth, endOfMonth, eachMonthOfInterval, subMon
 import { ptBR } from 'date-fns/locale';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.mjs?url';
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 import { cn } from './lib/utils';
 import { Asset, AssetType, Transaction, Dividend, Broker, AppData } from './types';
 import { ASSET_TYPES, ASSET_COLORS } from './constants';
+import { supabase } from './lib/supabase';
+import { Login } from './components/Login';
 
 const IRPF_CODES: Record<AssetType, { group: string; code: string }> = {
   'Ação': { group: '03', code: '01' },
@@ -298,36 +300,69 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 
 export default function App() {
   console.log("App component rendering");
-  const [data, setData] = useState<AppData>(() => {
-    const defaultValue: AppData = { brokers: [], currentBrokerId: null };
+  const [user, setUser] = useState<any>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [data, setData] = useState<AppData>({ brokers: [], currentBrokerId: null });
+
+  // Auth Listener
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+      setAuthLoading(false);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // Fetch data from Supabase
+  const fetchData = async () => {
+    if (!user) return;
+    setSyncLoading(true);
     try {
-      const saved = localStorage.getItem('lino_invest_data');
-      if (!saved) return defaultValue;
-      
-      const parsed = JSON.parse(saved);
-      if (!parsed || typeof parsed !== 'object') return defaultValue;
-      
-      const brokers = Array.isArray(parsed.brokers) ? parsed.brokers : [];
-      
-      // Migration: ensure arrays exist for all brokers
-      const migratedBrokers = brokers.map((b: any) => ({
-        ...b,
-        assets: Array.isArray(b.assets) ? b.assets : [],
-        transactions: Array.isArray(b.transactions) ? b.transactions : [],
-        dividends: Array.isArray(b.dividends) ? b.dividends : [],
-        irpfItems: Array.isArray(b.irpfItems) ? b.irpfItems : []
+      const { data: brokers, error: bError } = await supabase.from('brokers').select('*');
+      if (bError) throw bError;
+
+      const fullBrokers = await Promise.all(brokers.map(async (broker) => {
+        const [assets, transactions, dividends, irpfItems] = await Promise.all([
+          supabase.from('assets').select('*').eq('broker_id', broker.id),
+          supabase.from('transactions').select('*').eq('broker_id', broker.id),
+          supabase.from('dividends').select('*').eq('broker_id', broker.id),
+          supabase.from('irpf_items').select('*').eq('broker_id', broker.id),
+        ]);
+
+        return {
+          ...broker,
+          assets: assets.data || [],
+          transactions: transactions.data || [],
+          dividends: dividends.data || [],
+          irpfItems: irpfItems.data || []
+        };
       }));
-      
-      return {
-        ...parsed,
-        brokers: migratedBrokers,
-        currentBrokerId: parsed.currentBrokerId || (migratedBrokers[0]?.id || null)
-      };
-    } catch (e) {
-      console.error('Erro ao carregar dados do localStorage:', e);
-      return defaultValue;
+
+      setData({
+        brokers: fullBrokers,
+        currentBrokerId: fullBrokers[0]?.id || null
+      });
+    } catch (err) {
+      console.error('Erro ao buscar dados do Supabase:', err);
+      showNotify('Erro ao carregar dados', 'error');
+    } finally {
+      setSyncLoading(false);
     }
-  });
+  };
+
+  useEffect(() => {
+    if (user) {
+      fetchData();
+    } else {
+      setData({ brokers: [], currentBrokerId: null });
+    }
+  }, [user]);
 
   const [activeTab, setActiveTab] = useState<'assets' | 'transactions' | 'dividends' | 'analysis' | 'report' | 'irpf'>('assets');
   const [isAssetModalOpen, setIsAssetModalOpen] = useState(false);
@@ -749,9 +784,14 @@ export default function App() {
     };
   }, [currentBroker]);
 
-  useEffect(() => {
-    localStorage.setItem('lino_invest_data', JSON.stringify(data));
-  }, [data]);
+  // Sync removal (handled by Supabase now)
+  // useEffect(() => {
+  //   localStorage.setItem('lino_invest_data', JSON.stringify(data));
+  // }, [data]);
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+  };
 
   const showNotify = (message: string, type: 'success' | 'error' = 'success') => {
     setNotification({ message, type });
@@ -812,78 +852,128 @@ export default function App() {
     showNotify('Relatório exportado com sucesso!');
   };
 
-  const handleCreateBroker = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleCreateBroker = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    if (!user) return;
     const formData = new FormData(e.currentTarget);
     const name = formData.get('name') as string;
     const cnpj = formData.get('cnpj') as string;
     if (!name) return;
 
-    const newBroker: Broker = {
-      id: crypto.randomUUID(),
-      name,
-      cnpj,
-      assets: [],
-      transactions: [],
-      dividends: []
-    };
+    setSyncLoading(true);
+    try {
+      const { data: newBroker, error } = await supabase
+        .from('brokers')
+        .insert([{ name, cnpj, user_id: user.id }])
+        .select()
+        .single();
 
-    setData(prev => ({
-      ...prev,
-      brokers: [...prev.brokers, newBroker],
-      currentBrokerId: newBroker.id
-    }));
-    setIsBrokerModalOpen(false);
-    showNotify('Corretora criada com sucesso!');
+      if (error) throw error;
+
+      const brokerWithDetails: Broker = {
+        ...newBroker,
+        assets: [],
+        transactions: [],
+        dividends: [],
+        irpfItems: []
+      };
+
+      setData(prev => ({
+        ...prev,
+        brokers: [...prev.brokers, brokerWithDetails],
+        currentBrokerId: newBroker.id
+      }));
+      setIsBrokerModalOpen(false);
+      showNotify('Corretora criada com sucesso!');
+    } catch (err) {
+      console.error(err);
+      showNotify('Erro ao criar corretora', 'error');
+    } finally {
+      setSyncLoading(false);
+    }
   };
 
-  const handleSaveAsset = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleSaveAsset = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!currentBroker) return;
+    if (!currentBroker || !user) return;
     const formData = new FormData(e.currentTarget);
     const type = formData.get('type') as AssetType;
     const name = formData.get('name') as string;
     const code = formData.get('code') as string;
     const cnpj = formData.get('cnpj') as string;
 
-    if (editingAsset) {
-      setData(prev => ({
-        ...prev,
-        brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
-          ...b,
-          assets: (b.assets || []).map(a => a.id === editingAsset.id ? { ...a, type, name, code, cnpj } : a)
-        } : b)
-      }));
-      showNotify('Ativo atualizado!');
-    } else {
-      const newAsset: Asset = { id: crypto.randomUUID(), type, name, code, cnpj };
-      setData(prev => ({
-        ...prev,
-        brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
-          ...b,
-          assets: [...(b.assets || []), newAsset]
-        } : b)
-      }));
-      showNotify('Ativo adicionado!');
+    setSyncLoading(true);
+    try {
+      if (editingAsset) {
+        const { error } = await supabase
+          .from('assets')
+          .update({ type, name, code, cnpj })
+          .eq('id', editingAsset.id);
+        
+        if (error) throw error;
+
+        setData(prev => ({
+          ...prev,
+          brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
+            ...b,
+            assets: (b.assets || []).map(a => a.id === editingAsset.id ? { ...a, type, name, code, cnpj } : a)
+          } : b)
+        }));
+        showNotify('Ativo atualizado!');
+      } else {
+        const { data: newAsset, error } = await supabase
+          .from('assets')
+          .insert([{ type, name, code, cnpj, broker_id: currentBroker.id, user_id: user.id }])
+          .select()
+          .single();
+
+        if (error) throw error;
+
+        setData(prev => ({
+          ...prev,
+          brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
+            ...b,
+            assets: [...(b.assets || []), newAsset]
+          } : b)
+        }));
+        showNotify('Ativo adicionado!');
+      }
+      setIsAssetModalOpen(false);
+      setEditingAsset(null);
+    } catch (err) {
+      console.error(err);
+      showNotify('Erro ao salvar ativo', 'error');
+    } finally {
+      setSyncLoading(false);
     }
-    setIsAssetModalOpen(false);
-    setEditingAsset(null);
   };
 
-  const handleDeleteAsset = (id: string) => {
+  const handleDeleteAsset = async (id: string) => {
     if (!currentBroker) return;
     if ((currentBroker.transactions || []).some(t => t.assetId === id)) {
       showNotify('Não é possível excluir ativo com transações!', 'error');
       return;
     }
-    setData(prev => ({
-      ...prev,
-      brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
-        ...b,
-        assets: (b.assets || []).filter(a => a.id !== id)
-      } : b)
-    }));
-    showNotify('Ativo removido');
+
+    setSyncLoading(true);
+    try {
+      const { error } = await supabase.from('assets').delete().eq('id', id);
+      if (error) throw error;
+
+      setData(prev => ({
+        ...prev,
+        brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
+          ...b,
+          assets: (b.assets || []).filter(a => a.id !== id)
+        } : b)
+      }));
+      showNotify('Ativo removido');
+    } catch (err) {
+      console.error(err);
+      showNotify('Erro ao remover ativo', 'error');
+    } finally {
+      setSyncLoading(false);
+    }
   };
 
   const handleDeleteTransaction = (id: string) => {
@@ -891,15 +981,26 @@ export default function App() {
     askConfirm(
       'Excluir Transação',
       'Tem certeza que deseja remover esta transação?',
-      () => {
-        setData(prev => ({
-          ...prev,
-          brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
-            ...b,
-            transactions: (b.transactions || []).filter(t => t.id !== id)
-          } : b)
-        }));
-        showNotify('Transação removida');
+      async () => {
+        setSyncLoading(true);
+        try {
+          const { error } = await supabase.from('transactions').delete().eq('id', id);
+          if (error) throw error;
+
+          setData(prev => ({
+            ...prev,
+            brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
+              ...b,
+              transactions: (b.transactions || []).filter(t => t.id !== id)
+            } : b)
+          }));
+          showNotify('Transação removida');
+        } catch (err) {
+          console.error(err);
+          showNotify('Erro ao remover transação', 'error');
+        } finally {
+          setSyncLoading(false);
+        }
       }
     );
   };
@@ -909,22 +1010,33 @@ export default function App() {
     askConfirm(
       'Excluir Rendimento',
       'Tem certeza que deseja remover este rendimento?',
-      () => {
-        setData(prev => ({
-          ...prev,
-          brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
-            ...b,
-            dividends: (b.dividends || []).filter(d => d.id !== id)
-          } : b)
-        }));
-        showNotify('Rendimento removido');
+      async () => {
+        setSyncLoading(true);
+        try {
+          const { error } = await supabase.from('dividends').delete().eq('id', id);
+          if (error) throw error;
+
+          setData(prev => ({
+            ...prev,
+            brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
+              ...b,
+              dividends: (b.dividends || []).filter(d => d.id !== id)
+            } : b)
+          }));
+          showNotify('Rendimento removido');
+        } catch (err) {
+          console.error(err);
+          showNotify('Erro ao remover rendimento', 'error');
+        } finally {
+          setSyncLoading(false);
+        }
       }
     );
   };
 
-  const handleSaveTransaction = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleSaveTransaction = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!currentBroker) return;
+    if (!currentBroker || !user) return;
     const formData = new FormData(e.currentTarget);
     const assetId = formData.get('assetId') as string;
     const date = formData.get('date') as string;
@@ -932,37 +1044,68 @@ export default function App() {
     const quantity = parseFloat(formData.get('quantity') as string);
     const price = parseFloat(formData.get('price') as string);
 
-    const newTransaction: Transaction = { id: crypto.randomUUID(), assetId, date, quantity, price, type };
-    setData(prev => ({
-      ...prev,
-      brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
-        ...b,
-        transactions: [...(b.transactions || []), newTransaction]
-      } : b)
-    }));
-    setIsTransactionModalOpen(false);
-    showNotify('Transação registrada!');
+    setSyncLoading(true);
+    try {
+      const { data: newTransaction, error } = await supabase
+        .from('transactions')
+        .insert([{ asset_id: assetId, date, quantity, price, type, broker_id: currentBroker.id, user_id: user.id }])
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      // Update state
+      setData(prev => ({
+        ...prev,
+        brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
+          ...b,
+          transactions: [...(b.transactions || []), newTransaction]
+        } : b)
+      }));
+      setIsTransactionModalOpen(false);
+      showNotify('Transação registrada!');
+    } catch (err) {
+      console.error(err);
+      showNotify('Erro ao salvar transação', 'error');
+    } finally {
+      setSyncLoading(false);
+    }
   };
 
-  const handleSaveDividend = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleSaveDividend = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!currentBroker) return;
+    if (!currentBroker || !user) return;
     const formData = new FormData(e.currentTarget);
     const assetId = formData.get('assetId') as string;
     const date = formData.get('date') as string;
     const dividendValue = parseFloat(formData.get('dividendValue') as string || '0');
     const jcpValue = parseFloat(formData.get('jcpValue') as string || '0');
 
-    const newDividend: Dividend = { id: crypto.randomUUID(), assetId, date, dividendValue, jcpValue };
-    setData(prev => ({
-      ...prev,
-      brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
-        ...b,
-        dividends: [...(b.dividends || []), newDividend]
-      } : b)
-    }));
-    setIsDividendModalOpen(false);
-    showNotify('Rendimento registrado!');
+    setSyncLoading(true);
+    try {
+      const { data: newDividend, error } = await supabase
+        .from('dividends')
+        .insert([{ asset_id: assetId, date, dividend_value: dividendValue, jcp_value: jcpValue, broker_id: currentBroker.id, user_id: user.id }])
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      setData(prev => ({
+        ...prev,
+        brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
+          ...b,
+          dividends: [...(b.dividends || []), newDividend]
+        } : b)
+      }));
+      setIsDividendModalOpen(false);
+      showNotify('Rendimento registrado!');
+    } catch (err) {
+      console.error(err);
+      showNotify('Erro ao salvar rendimento', 'error');
+    } finally {
+      setSyncLoading(false);
+    }
   };
 
   const handlePdfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1022,12 +1165,12 @@ export default function App() {
   };
 
   const extractDataFromPdf = async (text: string) => {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
     if (!apiKey) {
       throw new Error('Chave de API do Gemini não configurada. Verifique as configurações.');
     }
 
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = new GoogleGenAI(apiKey);
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
       contents: `Você é um especialista em mercado financeiro brasileiro e contabilidade para Imposto de Renda. 
@@ -1099,76 +1242,85 @@ export default function App() {
     }
   };
 
-  const processExtractedData = (extracted: { transactions: any[], dividends: any[] }) => {
-    if (!currentBroker) return;
+  const processExtractedData = async (extracted: { transactions: any[], dividends: any[] }) => {
+    if (!currentBroker || !user) return;
 
-    setData(prev => {
-      const broker = prev.brokers.find(b => b.id === prev.currentBrokerId)!;
-      const newAssets = [...broker.assets];
-      const newTransactions = [...broker.transactions];
-      const newDividends = [...broker.dividends];
+    setSyncLoading(true);
+    try {
+      const broker = data.brokers.find(b => b.id === data.currentBrokerId)!;
+      const currentAssets = [...broker.assets];
+      
+      // 1. Handle Assets (Ensure all exist in DB)
+      const uniqueAssetCodes = new Set([
+        ...(extracted.transactions || []).map(t => t.code.toUpperCase().trim()),
+        ...(extracted.dividends || []).map(d => d.code.toUpperCase().trim())
+      ]);
 
-      // Processar Transações
-      extracted.transactions?.forEach(item => {
-        const code = item.code.toUpperCase().trim();
-        let asset = newAssets.find(a => a.code.toUpperCase() === code);
-        
-        if (!asset) {
+      const assetMap: Record<string, string> = {};
+      currentAssets.forEach(a => assetMap[a.code.toUpperCase()] = a.id);
+
+      for (const code of uniqueAssetCodes) {
+        if (!assetMap[code]) {
           let type: AssetType = 'Ação';
           if (code.endsWith('11') && !code.startsWith('BOVA')) type = 'FII';
           if (code.endsWith('34')) type = 'BDR';
           if (code.includes('CDB')) type = 'CDB';
           if (code.includes('TESOURO')) type = 'Tesouro Direto';
 
-          asset = { id: crypto.randomUUID(), code: code, name: code, type: type };
-          newAssets.push(asset);
+          const { data: newAsset, error } = await supabase
+            .from('assets')
+            .insert([{ code, name: code, type, broker_id: broker.id, user_id: user.id }])
+            .select()
+            .single();
+          
+          if (error) throw error;
+          assetMap[code] = newAsset.id;
+          currentAssets.push(newAsset);
         }
+      }
 
+      // 2. Prepare Transactions
+      const transactionsToInsert = (extracted.transactions || []).map(item => {
         const isVenda = item.type.toLowerCase().includes('venda') || item.type.toUpperCase() === 'V' || item.type.toUpperCase() === 'VENDA';
-        const type: 'Compra' | 'Venda' = isVenda ? 'Venda' : 'Compra';
-        
-        newTransactions.push({
-          id: crypto.randomUUID(),
-          assetId: asset.id,
+        return {
+          asset_id: assetMap[item.code.toUpperCase().trim()],
           date: item.date,
           quantity: Math.abs(item.quantity),
           price: item.price,
-          type: type
-        });
+          type: isVenda ? 'Venda' : 'Compra',
+          broker_id: broker.id,
+          user_id: user.id
+        };
       });
 
-      // Processar Rendimentos
-      extracted.dividends?.forEach(item => {
-        const code = item.code.toUpperCase().trim();
-        let asset = newAssets.find(a => a.code.toUpperCase() === code);
-        
-        if (!asset) {
-          let type: AssetType = 'Ação';
-          if (code.endsWith('11') && !code.startsWith('BOVA')) type = 'FII';
-          if (code.endsWith('34')) type = 'BDR';
-          asset = { id: crypto.randomUUID(), code: code, name: code, type: type };
-          newAssets.push(asset);
-        }
+      // 3. Prepare Dividends
+      const dividendsToInsert = (extracted.dividends || []).map(item => ({
+        asset_id: assetMap[item.code.toUpperCase().trim()],
+        date: item.date,
+        dividend_value: item.dividendValue || 0,
+        jcp_value: item.jcpValue || 0,
+        broker_id: broker.id,
+        user_id: user.id
+      }));
 
-        newDividends.push({
-          id: crypto.randomUUID(),
-          assetId: asset.id,
-          date: item.date,
-          dividendValue: item.dividendValue || 0,
-          jcpValue: item.jcpValue || 0
-        });
-      });
+      // 4. Bulk Insert
+      if (transactionsToInsert.length > 0) {
+        const { error } = await supabase.from('transactions').insert(transactionsToInsert);
+        if (error) throw error;
+      }
+      if (dividendsToInsert.length > 0) {
+        const { error } = await supabase.from('dividends').insert(dividendsToInsert);
+        if (error) throw error;
+      }
 
-      return {
-        ...prev,
-        brokers: prev.brokers.map(b => b.id === broker.id ? {
-          ...b,
-          assets: newAssets,
-          transactions: newTransactions,
-          dividends: newDividends
-        } : b)
-      };
-    });
+      // 5. Final State Update
+      await fetchData(); // Refresh everything to be safe and consistent
+    } catch (err) {
+      console.error(err);
+      showNotify('Erro ao processar dados importados', 'error');
+    } finally {
+      setSyncLoading(false);
+    }
   };
 
   const handleIrpfPdfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1208,10 +1360,10 @@ export default function App() {
   };
 
   const extractIrpfDataFromPdf = async (text: string) => {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
     if (!apiKey) throw new Error('API Key não configurada');
 
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = new GoogleGenAI(apiKey);
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
       contents: `Você é um especialista em IRPF (Imposto de Renda Pessoa Física) do Brasil.
@@ -1275,15 +1427,26 @@ export default function App() {
     }
   };
 
-  const processExtractedIrpfData = (items: any[]) => {
-    if (!currentBroker) return;
-    setData(prev => ({
-      ...prev,
-      brokers: prev.brokers.map(b => b.id === prev.currentBrokerId ? {
-        ...b,
-        irpfItems: [...(b.irpfItems || []), ...items.map(item => ({ ...item, id: crypto.randomUUID() }))]
-      } : b)
-    }));
+  const processExtractedIrpfData = async (items: any[]) => {
+    if (!currentBroker || !user) return;
+    setSyncLoading(true);
+    try {
+      const itemsToInsert = items.map(item => ({
+        ...item,
+        broker_id: currentBroker.id,
+        user_id: user.id
+      }));
+
+      const { error } = await supabase.from('irpf_items').insert(itemsToInsert);
+      if (error) throw error;
+
+      await fetchData();
+    } catch (err) {
+      console.error(err);
+      showNotify('Erro ao salvar itens de IR', 'error');
+    } finally {
+      setSyncLoading(false);
+    }
   };
 
   const groupedTransactions: Record<string, Transaction[]> = useMemo(() => {
@@ -1386,9 +1549,31 @@ export default function App() {
 
   // --- Render ---
 
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Login onLogin={fetchData} />;
+  }
+
   return (
     <ErrorBoundary>
       <div className="min-h-screen bg-slate-50 flex flex-col">
+      {syncLoading && (
+        <div className="fixed top-0 left-0 w-full h-1 bg-blue-500/20 z-[60] overflow-hidden">
+          <motion.div 
+            initial={{ x: '-100%' }}
+            animate={{ x: '100%' }}
+            transition={{ repeat: Infinity, duration: 1.5, ease: 'linear' }}
+            className="w-1/2 h-full bg-blue-600"
+          />
+        </div>
+      )}
       {!currentBroker ? (
         <div className="flex-1 flex items-center justify-center p-6">
           <motion.div 
@@ -1487,8 +1672,8 @@ export default function App() {
               <Button variant="ghost" size="sm" onClick={() => setIsBrokerModalOpen(true)} className="hidden sm:inline-flex">
                 <Building2 className="w-4 h-4 mr-2" /> Corretoras
               </Button>
-              <Button variant="ghost" size="sm" onClick={() => setData(prev => ({ ...prev, currentBrokerId: null }))} className="hidden sm:inline-flex">
-                <LogOut className="w-4 h-4 mr-2" /> Sair
+              <Button variant="ghost" size="sm" onClick={handleLogout} className="hidden sm:inline-flex text-red-500 hover:bg-red-50">
+                <LogOut className="w-4 h-4 mr-2" /> Sair da Conta
               </Button>
               <div className="md:hidden">
                 <Button variant="secondary" size="sm" onClick={() => setIsBrokerModalOpen(true)}>
@@ -2285,16 +2470,30 @@ export default function App() {
                         type="text"
                         placeholder="00.000.000/0000-00"
                         defaultValue={asset.cnpj || ''}
-                        onBlur={(e) => {
+                        onBlur={async (e) => {
                           const newCnpj = e.target.value;
                           if (newCnpj === asset.cnpj) return;
-                          setData(prev => ({
-                            ...prev,
-                            brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
-                              ...b,
-                              assets: b.assets.map(a => a.id === asset.id ? { ...a, cnpj: newCnpj } : a)
-                            } : b)
-                          }));
+                          setSyncLoading(true);
+                          try {
+                            const { error } = await supabase
+                              .from('assets')
+                              .update({ cnpj: newCnpj })
+                              .eq('id', asset.id);
+                            if (error) throw error;
+
+                            setData(prev => ({
+                              ...prev,
+                              brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
+                                ...b,
+                                assets: b.assets.map(a => a.id === asset.id ? { ...a, cnpj: newCnpj } : a)
+                              } : b)
+                            }));
+                          } catch (err) {
+                            console.error(err);
+                            showNotify('Erro ao atualizar CNPJ', 'error');
+                          } finally {
+                            setSyncLoading(false);
+                          }
                         }}
                         className="w-full px-3 py-1.5 text-sm border border-slate-200 rounded focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
                       />
@@ -2435,16 +2634,27 @@ export default function App() {
                       askConfirm(
                         'Excluir Corretora',
                         `Deseja realmente excluir a corretora ${b.name} e todos os seus dados? Esta ação não pode ser desfeita.`,
-                        () => {
-                          setData(prev => {
-                            const newBrokers = prev.brokers.filter(br => br.id !== b.id);
-                            return {
-                              ...prev,
-                              brokers: newBrokers,
-                              currentBrokerId: b.id === prev.currentBrokerId ? (newBrokers[0]?.id || null) : prev.currentBrokerId
-                            };
-                          });
-                          showNotify('Corretora removida');
+                        async () => {
+                          setSyncLoading(true);
+                          try {
+                            const { error } = await supabase.from('brokers').delete().eq('id', b.id);
+                            if (error) throw error;
+
+                            setData(prev => {
+                              const newBrokers = prev.brokers.filter(br => br.id !== b.id);
+                              return {
+                                ...prev,
+                                brokers: newBrokers,
+                                currentBrokerId: b.id === prev.currentBrokerId ? (newBrokers[0]?.id || null) : prev.currentBrokerId
+                              };
+                            });
+                            showNotify('Corretora removida');
+                          } catch (err) {
+                            console.error(err);
+                            showNotify('Erro ao remover corretora', 'error');
+                          } finally {
+                            setSyncLoading(false);
+                          }
                         }
                       );
                     }}
