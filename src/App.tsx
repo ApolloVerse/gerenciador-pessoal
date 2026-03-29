@@ -1186,7 +1186,7 @@ export default function App() {
 
     const ai = new GoogleGenAI({ apiKey: apiKey.trim() });
     const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash",
+      model: "gemini-2.5-flash",
       contents: `Você é um especialista em mercado financeiro brasileiro e contabilidade para Imposto de Renda. 
       Analise o texto extraído de um documento financeiro (Nota de Corretagem, Extrato de Rendimentos, Informe de Rendimentos, etc.) e extraia todas as operações relevantes.
       
@@ -1381,7 +1381,7 @@ export default function App() {
 
     const ai = new GoogleGenAI({ apiKey: apiKey.trim() });
     const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash",
+      model: "gemini-2.5-flash",
       contents: `Você é um especialista em IRPF (Imposto de Renda Pessoa Física) do Brasil.
       Analise o Informe de Rendimentos fornecido e extraia TODOS os dados relevantes para a declaração anual.
       O objetivo é que o usuário saiba exatamente o que preencher em cada ficha do programa da Receita Federal.
