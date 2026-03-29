@@ -20,6 +20,15 @@ export const ASSET_COLORS: Record<AssetType, string> = {
 
 export const APP_CHANGELOG = [
   {
+    version: '1.4.1',
+    date: '2026-03-29',
+    updates: [
+      'Correção do bug de sincronização que impedia a exibição de dados na aba de Ativos',
+      'Correção do erro 429 (Quota Exceeded) ajustando o modelo para Gemini 1.5 Flash',
+      'Restaurada visibilidade de categorias e rendimentos no Portfólio'
+    ]
+  },
+  {
     version: '1.4.0',
     date: '2026-03-29',
     updates: [
