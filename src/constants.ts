@@ -20,6 +20,15 @@ export const ASSET_COLORS: Record<AssetType, string> = {
 
 export const APP_CHANGELOG = [
   {
+    version: '1.5.0',
+    date: '2026-03-29',
+    updates: [
+      'Atualização geral do sistema para a versão 1.5.0',
+      'Melhorias de desempenho e estabilidade',
+      'Preparação estrutural para novos recursos'
+    ]
+  },
+  {
     version: '1.4.1',
     date: '2026-03-29',
     updates: [
