@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ShieldCheck, Mail, Lock, Loader2, ArrowRight } from 'lucide-react';
 import { motion } from 'motion/react';
 import { supabase } from '../lib/supabase';
+import pkg from '../../package.json';
 
 interface LoginProps {
   onLogin: () => void;
@@ -142,8 +143,11 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
         </div>
 
         <div className="bg-slate-50 p-4 text-center">
-          <p className="text-[10px] text-slate-400 font-medium uppercase tracking-[0.2em]">
+          <p className="text-[10px] text-slate-400 font-medium uppercase tracking-[0.2em] mb-1">
             Protocolo de Segurança Zero Trust Ativo
+          </p>
+          <p className="text-[10px] text-slate-300 font-bold tracking-widest">
+            v{pkg.version}
           </p>
         </div>
       </motion.div>

@@ -49,6 +49,7 @@ import { Asset, AssetType, Transaction, Dividend, Broker, AppData } from './type
 import { ASSET_TYPES, ASSET_COLORS } from './constants';
 import { supabase } from './lib/supabase';
 import { Login } from './components/Login';
+import pkg from '../package.json';
 
 const IRPF_CODES: Record<AssetType, { group: string; code: string }> = {
   'Ação': { group: '03', code: '01' },
@@ -59,8 +60,11 @@ const IRPF_CODES: Record<AssetType, { group: string; code: string }> = {
   'Crypto': { group: '08', code: '01' },
 };
 
-// Configure PDF.js worker using the local bundled worker to avoid version mismatch
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
+// Configure PDF.js worker using the local bundled worker
+if (typeof window !== 'undefined' && pdfjsLib.GlobalWorkerOptions) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
+}
+
 
 // --- Components ---
 
@@ -1176,13 +1180,13 @@ export default function App() {
 
   const extractDataFromPdf = async (text: string) => {
     const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error('Chave de API do Gemini não configurada. Verifique as configurações.');
+    if (!apiKey || apiKey.trim() === '' || apiKey === 'your_google_gemini_api_key' || apiKey === 'undefined') {
+      throw new Error('Chave de API do Gemini não configurada no .env ou Vercel. Verifique as variáveis de ambiente.');
     }
 
-    const ai = new GoogleGenAI(apiKey);
+    const ai = new GoogleGenAI({ apiKey: apiKey.trim() });
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-1.5-flash",
       contents: `Você é um especialista em mercado financeiro brasileiro e contabilidade para Imposto de Renda. 
       Analise o texto extraído de um documento financeiro (Nota de Corretagem, Extrato de Rendimentos, Informe de Rendimentos, etc.) e extraia todas as operações relevantes.
       
@@ -1208,31 +1212,31 @@ export default function App() {
       config: {
         responseMimeType: "application/json",
         responseSchema: {
-          type: Type.OBJECT,
+          type: "object",
           properties: {
             transactions: {
-              type: Type.ARRAY,
+              type: "array",
               items: {
-                type: Type.OBJECT,
+                type: "object",
                 properties: {
-                  date: { type: Type.STRING, description: "Data no formato YYYY-MM-DD" },
-                  code: { type: Type.STRING, description: "Código do ativo (ex: PETR4)" },
-                  type: { type: Type.STRING, description: "Tipo: 'Compra' ou 'Venda'" },
-                  quantity: { type: Type.NUMBER },
-                  price: { type: Type.NUMBER }
+                  date: { type: "string", description: "Data no formato YYYY-MM-DD" },
+                  code: { type: "string", description: "Código do ativo (ex: PETR4)" },
+                  type: { type: "string", description: "Tipo: 'Compra' ou 'Venda'" },
+                  quantity: { type: "number" },
+                  price: { type: "number" }
                 },
                 required: ["date", "code", "type", "quantity", "price"]
               }
             },
             dividends: {
-              type: Type.ARRAY,
+              type: "array",
               items: {
-                type: Type.OBJECT,
+                type: "object",
                 properties: {
-                  date: { type: Type.STRING, description: "Data no formato YYYY-MM-DD" },
-                  code: { type: Type.STRING, description: "Código do ativo (ex: PETR4)" },
-                  dividendValue: { type: Type.NUMBER, description: "Valor de dividendos ou rendimentos isentos" },
-                  jcpValue: { type: Type.NUMBER, description: "Valor de JCP (Juros sobre Capital Próprio)" }
+                  date: { type: "string", description: "Data no formato YYYY-MM-DD" },
+                  code: { type: "string", description: "Código do ativo (ex: PETR4)" },
+                  dividendValue: { type: "number", description: "Valor de dividendos ou rendimentos isentos" },
+                  jcpValue: { type: "number", description: "Valor de JCP (Juros sobre Capital Próprio)" }
                 },
                 required: ["date", "code"]
               }
@@ -1341,7 +1345,7 @@ export default function App() {
     try {
       const arrayBuffer = await file.arrayBuffer();
       const typedArray = new Uint8Array(arrayBuffer);
-      const loadingTask = (window as any).pdfjsLib.getDocument(typedArray);
+      const loadingTask = pdfjsLib.getDocument(typedArray);
       const pdf = await loadingTask.promise;
       
       let fullText = "";
@@ -1371,11 +1375,13 @@ export default function App() {
 
   const extractIrpfDataFromPdf = async (text: string) => {
     const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-    if (!apiKey) throw new Error('API Key não configurada');
+    if (!apiKey || apiKey.trim() === '' || apiKey === 'your_google_gemini_api_key' || apiKey === 'undefined') {
+      throw new Error('Chave de API do Gemini não configurada no .env ou Vercel. Verifique as variáveis de ambiente.');
+    }
 
-    const ai = new GoogleGenAI(apiKey);
+    const ai = new GoogleGenAI({ apiKey: apiKey.trim() });
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-1.5-flash",
       contents: `Você é um especialista em IRPF (Imposto de Renda Pessoa Física) do Brasil.
       Analise o Informe de Rendimentos fornecido e extraia TODOS os dados relevantes para a declaração anual.
       O objetivo é que o usuário saiba exatamente o que preencher em cada ficha do programa da Receita Federal.
@@ -1409,19 +1415,19 @@ export default function App() {
       config: {
         responseMimeType: "application/json",
         responseSchema: {
-          type: Type.ARRAY,
+          type: "array",
           items: {
-            type: Type.OBJECT,
+            type: "object",
             properties: {
-              topic: { type: Type.STRING },
-              ficha: { type: Type.STRING },
-              group: { type: Type.STRING },
-              code: { type: Type.STRING },
-              description: { type: Type.STRING },
-              cnpj: { type: Type.STRING },
-              value: { type: Type.NUMBER },
-              previousValue: { type: Type.NUMBER },
-              assetCode: { type: Type.STRING }
+              topic: { type: "string" },
+              ficha: { type: "string" },
+              group: { type: "string" },
+              code: { type: "string" },
+              description: { type: "string" },
+              cnpj: { type: "string" },
+              value: { type: "number" },
+              previousValue: { type: "number" },
+              assetCode: { type: "string" }
             },
             required: ["topic", "code", "description", "value"]
           }
@@ -1694,7 +1700,12 @@ export default function App() {
                 <TrendingUp className="w-6 h-6 text-white" />
               </div>
               <div>
-                <h1 className="text-lg font-bold text-slate-900 leading-tight">Gerenciador de IR</h1>
+                <h1 className="text-lg font-bold text-slate-900 leading-tight flex items-center">
+                  Gerenciador de IR
+                  <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-700 tracking-wider">
+                    v{pkg.version}
+                  </span>
+                </h1>
                 <p className="text-xs text-slate-500 font-medium">{currentBroker?.name || 'Nenhuma corretora selecionada'}</p>
               </div>
             </div>
