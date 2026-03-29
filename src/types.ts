@@ -11,7 +11,7 @@ export interface Asset {
 export interface Transaction {
   id: string;
   date: string;
-  assetId: string;
+  asset_id: string; // Changed from assetId
   quantity: number;
   price: number;
   type: 'Compra' | 'Venda';
@@ -20,9 +20,9 @@ export interface Transaction {
 export interface Dividend {
   id: string;
   date: string;
-  assetId: string;
-  dividendValue: number;
-  jcpValue: number;
+  asset_id: string; // Changed from assetId
+  dividend_value: number; // Changed from dividendValue
+  jcp_value: number; // Changed from jcpValue
 }
 
 export interface IrpfItem {
@@ -40,8 +40,8 @@ export interface IrpfItem {
   description: string;
   cnpj?: string;
   value: number;
-  previousValue?: number;
-  assetCode?: string;
+  previous_value?: number; // Changed from previousValue
+  asset_code?: string; // Changed from assetCode
 }
 
 export interface Broker {

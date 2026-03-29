@@ -107,14 +107,14 @@ const Button = ({
   );
 };
 
-const Card = ({ children, className, title, description, footer }: { 
+const Card = ({ children, className, title, description, footer, ...props }: { 
   children: React.ReactNode; 
   className?: string;
   title?: string;
   description?: string;
   footer?: React.ReactNode;
-}) => (
-  <div className={cn('bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden', className)}>
+} & React.HTMLAttributes<HTMLDivElement>) => (
+  <div className={cn('bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden', className)} {...props}>
     {(title || description) && (
       <div className="px-6 py-4 border-bottom border-slate-100">
         {title && <h3 className="text-lg font-semibold text-slate-900">{title}</h3>}
@@ -452,68 +452,65 @@ export default function App() {
     const stats: Record<string, { 
       quantity: number; 
       totalInvested: number; 
-      avgPrice: number;
-      boughtQuantity: number;
       soldQuantity: number;
       quantity2023: number;
       totalInvested2023: number;
+      totalDividends: number;
+      yieldOnCost: number;
     }> = {};
 
     (currentBroker.assets || []).forEach(asset => {
-      // Ordenar transações por data para cálculo correto de preço médio
-      const transactions = [...(currentBroker.transactions || [])]
-        .filter(t => t.assetId === asset.id)
-        .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+      const stats: any = {
+        quantity: 0,
+        totalInvested: 0,
+        avgPrice: 0,
+        boughtQuantity: 0,
+        soldQuantity: 0,
+        quantity2023: 0,
+        totalInvested2023: 0,
+        totalDividends: 0,
+        yieldOnCost: 0
+      };
 
-      let quantity = 0;
-      let totalInvested = 0;
-      let avgPrice = 0;
-      let boughtQuantity = 0;
-      let soldQuantity = 0;
-      let quantity2023 = 0;
-      let totalInvested2023 = 0;
+      const transactions = [...(currentBroker.transactions || [])]
+        .filter(t => t.asset_id === asset.id)
+        .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
 
       transactions.forEach(t => {
         const isBefore2024 = t.date && t.date < '2024-01-01';
         if (t.type === 'Compra') {
-          boughtQuantity += t.quantity;
-          const newQuantity = quantity + t.quantity;
-          const newTotalInvested = totalInvested + (t.quantity * t.price);
-          quantity = newQuantity;
-          totalInvested = newTotalInvested;
-          avgPrice = quantity > 0 ? totalInvested / quantity : 0;
+          stats.boughtQuantity += t.quantity;
+          const newQuantity = stats.quantity + t.quantity;
+          const newTotalInvested = stats.totalInvested + (t.quantity * t.price);
+          stats.quantity = newQuantity;
+          stats.totalInvested = newTotalInvested;
+          stats.avgPrice = stats.quantity > 0 ? stats.totalInvested / stats.quantity : 0;
         } else {
-          soldQuantity += t.quantity;
-          // Venda: reduz quantidade, mas o preço médio permanece o mesmo
-          // O total investido (custo de aquisição) reduz proporcionalmente
+          stats.soldQuantity += t.quantity;
           const saleQuantity = Math.abs(t.quantity);
-          if (quantity > 0) {
-            const ratio = (quantity - saleQuantity) / quantity;
-            quantity = Math.max(0, quantity - saleQuantity);
-            totalInvested = quantity > 0 ? totalInvested * ratio : 0;
-            // avgPrice permanece o mesmo
+          if (stats.quantity > 0) {
+            const ratio = (stats.quantity - saleQuantity) / stats.quantity;
+            stats.quantity = Math.max(0, stats.quantity - saleQuantity);
+            stats.totalInvested = stats.quantity > 0 ? stats.totalInvested * ratio : 0;
           } else {
-            quantity = 0;
-            totalInvested = 0;
-            avgPrice = 0;
+            stats.quantity = 0;
+            stats.totalInvested = 0;
+            stats.avgPrice = 0;
           }
         }
 
         if (isBefore2024) {
-          quantity2023 = quantity;
-          totalInvested2023 = totalInvested;
+          stats.quantity2023 = stats.quantity;
+          stats.totalInvested2023 = stats.totalInvested;
         }
       });
 
-      stats[asset.id] = {
-        quantity,
-        totalInvested,
-        avgPrice,
-        boughtQuantity,
-        soldQuantity,
-        quantity2023,
-        totalInvested2023
-      };
+      // Calcular Yield on Cost
+      const dividends = (currentBroker.dividends || []).filter(d => d.asset_id === asset.id);
+      stats.totalDividends = dividends.reduce((acc, curr) => acc + curr.dividend_value + curr.jcp_value, 0);
+      stats.yieldOnCost = stats.totalInvested > 0 ? (stats.totalDividends / stats.totalInvested) * 100 : 0;
+
+      stats[asset.id] = stats;
     });
     return stats;
   }, [currentBroker]);
@@ -533,10 +530,7 @@ export default function App() {
 
   const allIrpfItems = useMemo(() => {
     if (!currentBroker) return [];
-    
     const items: any[] = [];
-    
-    // 1. Bens e Direitos from Assets
     (currentBroker.assets || []).forEach(asset => {
       const stats = assetStats[asset.id];
       if (stats && stats.quantity > 0) {
@@ -549,58 +543,51 @@ export default function App() {
           code: codes.code,
           description: getBensEDireitosDescription(asset, stats),
           value: stats.totalInvested,
-          previousValue: stats.totalInvested2023,
-          cnpj: asset.cnpj || currentBroker.cnpj,
-          guide: `Declare no grupo ${codes.group} e código ${codes.code}. No campo 'Discriminação', informe a quantidade, o nome do ativo, o CNPJ da empresa e a corretora onde estão custodiados.`
+          previous_value: stats.totalInvested2023,
+          cnpj: asset.cnpj || currentBroker.cnpj
         });
       }
     });
 
-    // 2. Rendimentos from Dividends
     const dividendsByAsset: Record<string, { dividend: number; jcp: number }> = {};
     (currentBroker.dividends || []).forEach(div => {
-      if (!dividendsByAsset[div.assetId]) {
-        dividendsByAsset[div.assetId] = { dividend: 0, jcp: 0 };
+      if (!dividendsByAsset[div.asset_id]) {
+        dividendsByAsset[div.asset_id] = { dividend: 0, jcp: 0 };
       }
-      dividendsByAsset[div.assetId].dividend += div.dividendValue || 0;
-      dividendsByAsset[div.assetId].jcp += div.jcpValue || 0;
+      dividendsByAsset[div.asset_id].dividend += div.dividend_value || 0;
+      dividendsByAsset[div.asset_id].jcp += div.jcp_value || 0;
     });
 
-    Object.entries(dividendsByAsset).forEach(([assetId, values]) => {
-      const asset = (currentBroker.assets || []).find(a => a.id === assetId);
+    Object.entries(dividendsByAsset).forEach(([asset_id, values]) => {
+      const asset = (currentBroker.assets || []).find(a => a.id === asset_id);
       if (!asset) return;
 
       if (values.dividend > 0) {
         const code = asset.type === 'Ação' ? '09' : '26';
-        const description = `Rendimentos isentos de ${asset.name} (${asset.code}) - ${currentBroker.name}`;
         items.push({
-          id: `auto-div-${assetId}`,
+          id: `auto-div-${asset_id}`,
           topic: 'Rendimentos Isentos',
           ficha: 'Rendimentos Isentos e Não Tributáveis',
           code: code,
-          description: description,
+          description: `Rendimentos isentos de ${asset.name} (${asset.code}) - ${currentBroker.name}`,
           value: values.dividend,
-          cnpj: asset.cnpj || currentBroker.cnpj,
-          guide: `Declare na ficha 'Rendimentos Isentos e Não Tributáveis', sob o código ${code}. Informe o CNPJ da fonte pagadora e o valor total recebido no ano.`
+          cnpj: asset.cnpj || currentBroker.cnpj
         });
       }
 
       if (values.jcp > 0) {
-        const description = `Juros sobre Capital Próprio de ${asset.name} (${asset.code}) - ${currentBroker.name}`;
         items.push({
-          id: `auto-jcp-${assetId}`,
+          id: `auto-jcp-${asset_id}`,
           topic: 'Rendimentos Sujeitos à Tributação Exclusiva',
           ficha: 'Rendimentos Sujeitos à Tributação Exclusiva/Definitiva',
           code: '10',
-          description: description,
+          description: `Juros sobre Capital Próprio de ${asset.name} (${asset.code}) - ${currentBroker.name}`,
           value: values.jcp,
-          cnpj: asset.cnpj || currentBroker.cnpj,
-          guide: `Declare na ficha 'Rendimentos Sujeitos à Tributação Exclusiva/Definitiva', sob o código 10. Informe o CNPJ da fonte pagadora e o valor total recebido no ano.`
+          cnpj: asset.cnpj || currentBroker.cnpj
         });
       }
     });
 
-    // Merge with manual items
     const manualItems = currentBroker ? (currentBroker.irpfItems || []) : [];
     return [...items, ...manualItems];
   }, [currentBroker, assetStats]);
@@ -608,57 +595,36 @@ export default function App() {
   const filteredDividends = useMemo(() => {
     if (!currentBroker) return [];
     return (currentBroker.dividends || []).filter(d => {
-      const asset = (currentBroker.assets || []).find(a => a.id === d.assetId);
-      const matchAsset = dividendFilterAsset === 'all' || d.assetId === dividendFilterAsset;
+      const asset = (currentBroker.assets || []).find(a => a.id === d.asset_id);
+      const matchAsset = dividendFilterAsset === 'all' || d.asset_id === dividendFilterAsset;
       const matchType = dividendFilterType === 'all' || asset?.type === dividendFilterType;
-      
       const date = parseISO(d.date);
       const matchYear = dividendFilterYear === 'all' || format(date, 'yyyy') === dividendFilterYear;
       const matchMonth = dividendFilterMonth === 'all' || format(date, 'MM') === dividendFilterMonth;
-      
       return matchAsset && matchType && matchYear && matchMonth;
     }).sort((a, b) => b.date.localeCompare(a.date));
   }, [currentBroker, dividendFilterAsset, dividendFilterType, dividendFilterYear, dividendFilterMonth]);
 
   const monthlyTaxData = useMemo(() => {
     if (!currentBroker) return [];
-    
-    const monthlyGains: Record<string, { 
-      month: string; 
-      stockSales: number; 
-      stockProfit: number; 
-      fiiProfit: number; 
-      bdrProfit: number;
-      otherProfit: number;
-    }> = {};
-
+    const monthlyGains: Record<string, any> = {};
     const assetAvgPrices: Record<string, { quantity: number; totalInvested: number; avgPrice: number }> = {};
-
-    // Sort all transactions chronologically
     const allTransactions = [...(currentBroker.transactions || [])]
       .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
 
     allTransactions.forEach(t => {
-      const asset = (currentBroker.assets || []).find(a => a.id === t.assetId);
+      const asset = (currentBroker.assets || []).find(a => a.id === t.asset_id);
       if (!asset) return;
 
-      const monthKey = t.date.substring(0, 7); // YYYY-MM
+      const monthKey = t.date.substring(0, 7);
       if (!monthlyGains[monthKey]) {
-        monthlyGains[monthKey] = { 
-          month: monthKey, 
-          stockSales: 0, 
-          stockProfit: 0, 
-          fiiProfit: 0, 
-          bdrProfit: 0, 
-          otherProfit: 0 
-        };
+        monthlyGains[monthKey] = { month: monthKey, stockSales: 0, stockProfit: 0, fiiProfit: 0, bdrProfit: 0, otherProfit: 0 };
       }
 
-      if (!assetAvgPrices[t.assetId]) {
-        assetAvgPrices[t.assetId] = { quantity: 0, totalInvested: 0, avgPrice: 0 };
+      if (!assetAvgPrices[t.asset_id]) {
+        assetAvgPrices[t.asset_id] = { quantity: 0, totalInvested: 0, avgPrice: 0 };
       }
-
-      const stats = assetAvgPrices[t.assetId];
+      const stats = assetAvgPrices[t.asset_id];
 
       if (t.type === 'Compra') {
         stats.quantity += t.quantity;
@@ -826,7 +792,7 @@ export default function App() {
 
   const totalDividends = useMemo(() => {
     if (!currentBroker) return 0;
-    return currentBroker.dividends.reduce((acc, curr) => acc + curr.dividendValue + curr.jcpValue, 0);
+    return currentBroker.dividends.reduce((acc, curr) => acc + curr.dividend_value + curr.jcp_value, 0);
   }, [currentBroker]);
 
   // --- Handlers ---
@@ -964,7 +930,7 @@ export default function App() {
 
   const handleDeleteAsset = async (id: string) => {
     if (!currentBroker) return;
-    if ((currentBroker.transactions || []).some(t => t.assetId === id)) {
+    if ((currentBroker.transactions || []).some(t => t.asset_id === id)) {
       showNotify('Não é possível excluir ativo com transações!', 'error');
       return;
     }
@@ -1052,7 +1018,7 @@ export default function App() {
     e.preventDefault();
     if (!currentBroker || !user) return;
     const formData = new FormData(e.currentTarget);
-    const assetId = formData.get('assetId') as string;
+    const asset_id = formData.get('asset_id') as string;
     const date = formData.get('date') as string;
     const type = formData.get('type') as 'Compra' | 'Venda';
     const quantity = parseFloat(formData.get('quantity') as string);
@@ -1062,7 +1028,7 @@ export default function App() {
     try {
       const { data: newTransaction, error } = await supabase
         .from('transactions')
-        .insert([{ asset_id: assetId, date, quantity, price, type, broker_id: currentBroker.id, user_id: user.id }])
+        .insert([{ asset_id, date, quantity, price, type, broker_id: currentBroker.id, user_id: user.id }])
         .select()
         .single();
 
@@ -1090,16 +1056,16 @@ export default function App() {
     e.preventDefault();
     if (!currentBroker || !user) return;
     const formData = new FormData(e.currentTarget);
-    const assetId = formData.get('assetId') as string;
+    const asset_id = formData.get('asset_id') as string;
     const date = formData.get('date') as string;
-    const dividendValue = parseFloat(formData.get('dividendValue') as string || '0');
-    const jcpValue = parseFloat(formData.get('jcpValue') as string || '0');
+    const dividend_value = parseFloat(formData.get('dividend_value') as string || '0');
+    const jcp_value = parseFloat(formData.get('jcp_value') as string || '0');
 
     setSyncLoading(true);
     try {
       const { data: newDividend, error } = await supabase
         .from('dividends')
-        .insert([{ asset_id: assetId, date, dividend_value: dividendValue, jcp_value: jcpValue, broker_id: currentBroker.id, user_id: user.id }])
+        .insert([{ asset_id, date, dividend_value, jcp_value, broker_id: currentBroker.id, user_id: user.id }])
         .select()
         .single();
 
@@ -1127,25 +1093,17 @@ export default function App() {
     if (!file || !currentBroker) return;
 
     setIsProcessingPdf(true);
-    console.log('Iniciando processamento do PDF:', file.name);
-
     try {
       const arrayBuffer = await file.arrayBuffer();
       const typedArray = new Uint8Array(arrayBuffer);
-      
-      console.log('Carregando documento PDF...');
       const loadingTask = pdfjsLib.getDocument(typedArray);
       const pdf = await loadingTask.promise;
       
-      console.log(`PDF carregado. Total de páginas: ${pdf.numPages}`);
       let fullText = "";
-
       for (let i = 1; i <= pdf.numPages; i++) {
-        console.log(`Extraindo texto da página ${i}...`);
         const page = await pdf.getPage(i);
         const textContent = await page.getTextContent();
         
-        // Melhoria na extração: preservando a estrutura básica de linhas
         let lastY;
         let pageText = "";
         for (const item of textContent.items as any[]) {
@@ -1155,36 +1113,26 @@ export default function App() {
           pageText += item.str + " ";
           lastY = item.transform[5];
         }
-        
         fullText += pageText + "\n--- NOVA PÁGINA ---\n";
       }
 
-      if (!fullText.trim()) {
-        throw new Error('Não foi possível extrair texto do PDF. O arquivo pode ser uma imagem ou estar protegido.');
-      }
-
-      console.log('Texto extraído com sucesso. Tamanho:', fullText.length);
-      console.log('Início do texto:', fullText.substring(0, 200));
-      console.log('Enviando para IA...');
       const extractedData = await extractDataFromPdf(fullText);
-      
-      console.log('Resposta da IA recebida:', extractedData);
-
-      if (extractedData && (extractedData.transactions?.length > 0 || extractedData.dividends?.length > 0)) {
-        processExtractedData(extractedData);
-        const tCount = extractedData.transactions?.length || 0;
-        const dCount = extractedData.dividends?.length || 0;
-        showNotify(`Importação concluída: ${tCount} transações e ${dCount} rendimentos.`);
+      if (extractedData) {
+        if (extractedData.type === 'informe' && extractedData.irpf_items?.length > 0) {
+          await processExtractedIrpfData(extractedData.irpf_items);
+          showNotify(`${extractedData.irpf_items.length} itens do Informe de Rendimentos carregados!`);
+        } else if (extractedData.transactions?.length > 0 || extractedData.dividends?.length > 0) {
+          await processExtractedData(extractedData);
+          showNotify(`Importação concluída.`);
+        } else {
+           showNotify('Nenhuma informação relevante encontrada.', 'error');
+        }
         setIsPdfModalOpen(false);
-      } else {
-        showNotify('Nenhuma informação relevante encontrada no PDF. Verifique se é um documento válido.', 'error');
       }
     } catch (error: any) {
-      console.error('Erro detalhado ao processar PDF:', error);
-      showNotify(error.message || 'Erro ao processar o PDF. Verifique o arquivo.', 'error');
+      showNotify(error.message || 'Erro ao processar o PDF.', 'error');
     } finally {
       setIsProcessingPdf(false);
-      // Limpar o input para permitir o mesmo arquivo novamente
       e.target.value = '';
     }
   };
@@ -1192,75 +1140,45 @@ export default function App() {
   const extractDataFromPdf = async (text: string) => {
     const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
     if (!apiKey || apiKey.trim() === '' || apiKey === 'your_google_gemini_api_key' || apiKey === 'undefined') {
-      throw new Error('Chave de API do Gemini não configurada no .env ou Vercel. Verifique as variáveis de ambiente.');
+      throw new Error('Chave de API do Gemini não configurada.');
     }
 
     const ai = new GoogleGenAI({ apiKey: apiKey.trim() });
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash",
-      contents: `Você é um especialista em mercado financeiro brasileiro e contabilidade para Imposto de Renda (IRPF). 
-      Analise o texto extraído de um documento financeiro (Nota de Corretagem, Extrato de Custódia, Informe de Rendimentos, etc.) e extraia todas as operações e proventos.
+      contents: `Você é um especialista em mercado financeiro brasileiro. Analise o documento financeiro (Nota de Corretagem ou Informe de Rendimentos) e extraia TODOS os dados relevantes.
       
-      ESPERE: O texto pode estar ligeiramente desorganizado devido à extração de PDF. Use sua inteligência para identificar tabelas de NEGÓCIOS REALIZADOS ou RENDIMENTOS PAGOS.
+      Regras de Extração:
+      1. DATA: Use o formato YYYY-MM-DD.
+      2. ATIVO (code): Ticker oficial (ex: PETR4, IVVB11).
+      3. NOME (name): Razão Social ou Nome Completo do Fundo/Empresa. Importante!
+      4. TIPO (type): Escolha entre 'Ação', 'FII', 'BDR', 'CDB', 'Tesouro Direto', 'Crypto'.
+      5. CNPJ: Extraia o CNPJ do ativo ou da fonte pagadora se estiver no texto.
+      6. VALORES: Números decimais puros (use ponto para decimal).
       
-      Tipos de dados a extrair:
-      1. TRANSAÇÕES: Compra e venda de ativos (Ações, FIIs, BDRs, ETFs, Opções).
-      2. RENDIMENTOS: Dividendos, Juros sobre Capital Próprio (JCP), Rendimentos de FIIs.
+      Identifique se o documento é uma 'nota' (operações de compra/venda) ou 'informe' (saldos e rendimentos anuais).
       
-      Regras de Ouro:
-      - DATA: Sempre no formato YYYY-MM-DD.
-      - ATIVO: Use o ticker (ex: PETR4, IVVB11, HGLG11). Se não houver ticker, use o nome reduzido.
-      - TIPO: 'Compra' (ou C) ou 'Venda' (ou V).
-      - VALORES: Use números decimais (ponto para decimal, sem separador de milhar).
-      
-      Retorne um objeto JSON estritamente no esquema fornecido. Se não encontrar nada, retorne arrays vazios, mas esforce-se para identificar padrões de corretoras como XP, BTG, Itaú, NuInvest, Inter, etc.
+      Retorne um objeto JSON rigoroso:
+      {
+        "type": "nota" | "informe",
+        "transactions": [{ "code", "name", "type", "date", "quantity", "price", "type_op": "Compra" | "Venda", "cnpj" }],
+        "dividends": [{ "code", "name", "type", "date", "dividend_value", "jcp_value", "cnpj" }],
+        "irpf_items": [{ "topic", "ficha", "group", "code", "description", "cnpj", "value", "previous_value", "asset_code" }]
+      }
       
       Texto do documento:
       ${text}`,
       config: {
         responseMimeType: "application/json",
-        responseSchema: {
-          type: "object",
-          properties: {
-            transactions: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  date: { type: "string", description: "Data no formato YYYY-MM-DD" },
-                  code: { type: "string", description: "Código do ativo (ex: PETR4)" },
-                  type: { type: "string", description: "Tipo: 'Compra' ou 'Venda'" },
-                  quantity: { type: "number" },
-                  price: { type: "number" }
-                },
-                required: ["date", "code", "type", "quantity", "price"]
-              }
-            },
-            dividends: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  date: { type: "string", description: "Data no formato YYYY-MM-DD" },
-                  code: { type: "string", description: "Código do ativo (ex: PETR4)" },
-                  dividendValue: { type: "number", description: "Valor de dividendos ou rendimentos isentos" },
-                  jcpValue: { type: "number", description: "Valor de JCP (Juros sobre Capital Próprio)" }
-                },
-                required: ["date", "code"]
-              }
-            }
-          },
-          required: ["transactions", "dividends"]
-        }
       }
     });
 
     try {
-      const result = JSON.parse(response.text || '{"transactions": [], "dividends": []}');
+      const result = JSON.parse(response.text || '{"transactions": [], "dividends": [], "irpf_items": []}');
       return result;
     } catch (e) {
       console.error('Erro ao parsear resposta do Gemini:', e, response.text);
-      throw new Error('A IA retornou um formato inválido. Tente novamente.');
+      throw new Error('A IA retornou um formato inválido.');
     }
   };
 
@@ -1281,17 +1199,18 @@ export default function App() {
       const assetMap: Record<string, string> = {};
       currentAssets.forEach(a => assetMap[a.code.toUpperCase()] = a.id);
 
-      for (const code of uniqueAssetCodes) {
+      for (const item of [...(extracted.transactions || []), ...(extracted.dividends || [])]) {
+        const code = item.code?.toUpperCase().trim();
+        if (!code) continue;
+        
         if (!assetMap[code]) {
-          let type: AssetType = 'Ação';
-          if (code.endsWith('11') && !code.startsWith('BOVA')) type = 'FII';
-          if (code.endsWith('34')) type = 'BDR';
-          if (code.includes('CDB')) type = 'CDB';
-          if (code.includes('TESOURO')) type = 'Tesouro Direto';
+          const name = item.name || code;
+          const type = item.type || 'Ação';
+          const cnpj = item.cnpj || '';
 
           const { data: newAsset, error } = await supabase
             .from('assets')
-            .insert([{ code, name: code, type, broker_id: broker.id, user_id: user.id }])
+            .insert([{ code, name, type, cnpj, broker_id: broker.id, user_id: user.id }])
             .select()
             .single();
           
@@ -1303,7 +1222,7 @@ export default function App() {
 
       // 2. Prepare Transactions
       const transactionsToInsert = (extracted.transactions || []).map(item => {
-        const isVenda = item.type.toLowerCase().includes('venda') || item.type.toUpperCase() === 'V' || item.type.toUpperCase() === 'VENDA';
+        const isVenda = item.type_op?.toLowerCase().includes('venda') || item.type?.toLowerCase().includes('venda') || item.type_op === 'V' || item.type === 'V';
         return {
           asset_id: assetMap[item.code.toUpperCase().trim()],
           date: item.date,
@@ -1319,8 +1238,8 @@ export default function App() {
       const dividendsToInsert = (extracted.dividends || []).map(item => ({
         asset_id: assetMap[item.code.toUpperCase().trim()],
         date: item.date,
-        dividend_value: item.dividendValue || 0,
-        jcp_value: item.jcpValue || 0,
+        dividend_value: item.dividend_value || 0,
+        jcp_value: item.jcp_value || 0,
         broker_id: broker.id,
         user_id: user.id
       }));
@@ -1404,34 +1323,31 @@ export default function App() {
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash",
       contents: `Você é um especialista em IRPF (Imposto de Renda Pessoa Física) do Brasil.
-      Analise o Informe de Rendimentos fornecido e extraia TODOS os dados relevantes para a declaração anual.
-      O objetivo é que o usuário saiba exatamente o que preencher em cada ficha do programa da Receita Federal.
+      Analise o Informe de Rendimentos fornecido e extraia TODOS os dados para a declaração anual.
+      O objetivo é capturar tanto RENDIMENTOS DE INVESTIMENTOS quanto RENDIMENTOS PESSOAIS (Salários, Aluguéis, etc.).
 
-      Distribua os dados nas seguintes categorias (topic):
-      1. 'Bens e Direitos': Saldos em contas, ações, FIIs, Tesouro, etc. (Posição em 31/12 do ano anterior e atual).
-      2. 'Rendimentos Isentos': Dividendos, rendimentos de FIIs, lucros, poupança, etc.
-      3. 'Rendimentos Sujeitos à Tributação Exclusiva': Juros sobre Capital Próprio (JCP), rendimentos de aplicações financeiras (CDB, etc.).
-      4. 'Rendimentos Tributáveis': Salários, prolabore, aluguéis (se houver no informe).
-      5. 'Imposto Retido na Fonte': Imposto retido sobre rendimentos tributáveis ou aplicações.
-      6. 'Rendimentos Recebidos Acumuladamente': Se houver essa seção no informe.
+      Categorias (topic):
+      1. 'Bens e Direitos': Saldos, Ações, FIIs, Tesouro, Moedas (Posição anterior e atual).
+      2. 'Rendimentos Isentos': Dividendos, Rendimentos FII, Poupança, Lucros.
+      3. 'Rendimentos Sujeitos à Tributação Exclusiva': JCP, Rendimentos de Aplicações (CDB, etc.).
+      4. 'Rendimentos Tributáveis': SALÁRIOS, PROLABORE, ALUGUÉIS, APOSENTADORIA.
+      5. 'Imposto Retido na Fonte': Imposto retido sobre salários ou aplicações.
+      6. 'Rendimentos Recebidos Acumuladamente': Seções específicas de anos anteriores.
 
-      Para cada item extraído, você DEVE fornecer:
+      Para cada item:
       - topic: Uma das categorias acima.
-      - ficha: O nome exato da ficha no programa IRPF (ex: "Bens e Direitos", "Rendimentos Isentos e Não Tributáveis", "Rendimentos Sujeitos à Tributação Exclusiva/Definitiva").
-      - group: O número do Grupo (para Bens e Direitos).
-      - code: O código numérico do item (ex: 01 para Ações, 03 para FIIs, 06 para JCP, etc.).
-      - description: Descrição completa e formatada para o campo "Discriminação" ou "Especificação". Inclua nome da fonte pagadora, CNPJ, ticker, quantidade e instituição de custódia.
-      - cnpj: CNPJ da fonte pagadora ou do ativo.
-      - value: Valor principal (rendimento ou saldo atual).
-      - previousValue: Valor no ano anterior (obrigatório para Bens e Direitos).
-      - assetCode: Ticker ou código do ativo se disponível.
+      - ficha: Nome exato da ficha no programa IRPF.
+      - group/code: Códigos oficiais da Receita Federal.
+      - description: Descrição completa. Inclua: Nome da Fonte Pagadora/Empresa, CNPJ, e detalhes do rendimento.
+      - cnpj: CNPJ da fonte pagadora.
+      - value: Valor do rendimento ou saldo atual.
+      - previous_value: Saldo no ano anterior (para Bens e Direitos).
+      - asset_code: Ticker (se for investimento).
 
-      Seja extremamente preciso com os códigos e grupos conforme a legislação vigente (IRPF 2024/2025).
-      Se houver múltiplos itens na mesma seção, extraia todos individualmente.
-
-      Retorne um JSON array de objetos.
+      Retorne um JSON array de objetos (snake_case):
+      (topic, ficha, group, code, description, cnpj, value, previous_value, asset_code).
       
-      Texto do informe:
+      Texto:
       ${text}`,
       config: {
         responseMimeType: "application/json",
@@ -1447,8 +1363,8 @@ export default function App() {
               description: { type: "string" },
               cnpj: { type: "string" },
               value: { type: "number" },
-              previousValue: { type: "number" },
-              assetCode: { type: "string" }
+              previous_value: { type: "number" },
+              asset_code: { type: "string" }
             },
             required: ["topic", "code", "description", "value"]
           }
@@ -1457,9 +1373,10 @@ export default function App() {
     });
 
     try {
-      return JSON.parse(response.text || '[]');
+      const result = JSON.parse(response.text || '[]');
+      return result;
     } catch (e) {
-      console.error('Erro ao parsear resposta do Gemini:', e);
+      console.error('Erro ao parsear resposta do Gemini:', e, response.text);
       return [];
     }
   };
@@ -1579,7 +1496,7 @@ export default function App() {
       const filtered = (currentBroker.dividends || []).filter(d => d.date.startsWith(monthStr));
       return {
         name: format(date, 'MMM/yy', { locale: ptBR }),
-        total: filtered.reduce((acc, curr) => acc + (curr.dividendValue || 0) + (curr.jcpValue || 0), 0)
+        total: filtered.reduce((acc, curr) => acc + (curr.dividend_value || 0) + (curr.jcp_value || 0), 0)
       };
     });
   }, [currentBroker]);
@@ -1724,7 +1641,7 @@ export default function App() {
                 <h1 className="text-lg font-bold text-slate-900 leading-tight flex items-center">
                   Gerenciador de IR
                   <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-700 tracking-wider">
-                    v{pkg.version}
+                    v1.4.0
                   </span>
                 </h1>
                 <p className="text-xs text-slate-500 font-medium">{currentBroker?.name || 'Nenhuma corretora selecionada'}</p>
@@ -1848,6 +1765,11 @@ export default function App() {
                             Investimento Total {sortField === 'totalInvested' && (sortDirection === 'asc' ? <ChevronUp className="w-3 h-3 ml-1" /> : <ChevronDown className="w-3 h-3 ml-1" />)}
                           </div>
                         </th>
+                        <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">
+                          <div className="flex items-center justify-end">
+                            Yield on Cost
+                          </div>
+                        </th>
                         <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-center">Ações</th>
                       </tr>
                     </thead>
@@ -1883,6 +1805,9 @@ export default function App() {
                               <td className="px-6 py-4 text-right font-medium text-slate-700">{stats?.quantity?.toLocaleString('pt-BR') || '0'}</td>
                               <td className="px-6 py-4 text-right text-slate-600">{formatCurrency(stats?.avgPrice || 0)}</td>
                               <td className="px-6 py-4 text-right font-bold text-slate-900">{formatCurrency(stats?.totalInvested || 0)}</td>
+                              <td className="px-6 py-4 text-right text-emerald-600 font-bold">
+                                {stats?.yieldOnCost ? `${stats.yieldOnCost.toFixed(2)}%` : '0.00%'}
+                              </td>
                               <td className="px-6 py-4">
                                 <div className="flex justify-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                                   <Button variant="ghost" size="sm" onClick={() => { setEditingAsset(asset); setIsAssetModalOpen(true); }}>
@@ -2011,7 +1936,7 @@ export default function App() {
                           </thead>
                           <tbody className="divide-y divide-slate-100">
                             {(transactions as Transaction[]).map(t => {
-                              const asset = (currentBroker.assets || []).find(a => a.id === t.assetId);
+                              const asset = (currentBroker.assets || []).find(a => a.id === t.asset_id);
                               return (
                                 <tr key={t.id} className="hover:bg-slate-50 transition-colors">
                                   <td className="px-6 py-4 text-sm text-slate-600">{format(parseISO(t.date), 'dd/MM/yyyy')}</td>
@@ -2120,14 +2045,14 @@ export default function App() {
                           </tr>
                         ) : (
                           filteredDividends.map(d => {
-                            const asset = (currentBroker.assets || []).find(a => a.id === d.assetId);
+                            const asset = (currentBroker.assets || []).find(a => a.id === d.asset_id);
                             return (
                               <tr key={d.id} className="hover:bg-slate-50 transition-colors">
                                 <td className="px-6 py-4 text-sm text-slate-600">{format(parseISO(d.date), 'dd/MM/yyyy')}</td>
                                 <td className="px-6 py-4 font-semibold text-slate-900">{asset?.code || 'Desconhecido'}</td>
-                                <td className="px-6 py-4 text-right text-emerald-600">{formatCurrency(d.dividendValue)}</td>
-                                <td className="px-6 py-4 text-right text-blue-600">{formatCurrency(d.jcpValue)}</td>
-                                <td className="px-6 py-4 text-right font-bold text-slate-900">{formatCurrency((d.dividendValue || 0) + (d.jcpValue || 0))}</td>
+                                <td className="px-6 py-4 text-right text-emerald-600">{formatCurrency(d.dividend_value)}</td>
+                                <td className="px-6 py-4 text-right text-blue-600">{formatCurrency(d.jcp_value)}</td>
+                                <td className="px-6 py-4 text-right font-bold text-slate-900">{formatCurrency((d.dividend_value || 0) + (d.jcp_value || 0))}</td>
                                 <td className="px-6 py-4 text-center">
                                   <Button variant="ghost" size="sm" onClick={() => handleDeleteDividend(d.id)} className="text-red-500">
                                     <Trash2 className="w-4 h-4" />
@@ -2317,62 +2242,77 @@ export default function App() {
 
                   return (
                     <div key={type} className="space-y-6">
-                      <h3 className="text-lg font-bold text-slate-800 border-b border-slate-200 pb-2">{type}</h3>
+                      <div className="flex justify-between items-end border-b border-slate-200 pb-2">
+                        <h3 className="text-lg font-bold text-slate-800">{type}</h3>
+                        <div className="text-right">
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Total na Categoria</p>
+                          <p className="text-sm font-bold text-slate-700">
+                            {formatCurrency(activeAssets.reduce((acc, a) => acc + (assetStats[a.id]?.totalInvested || 0), 0))}
+                          </p>
+                        </div>
+                      </div>
                       <div className="grid grid-cols-1 gap-6">
                         {activeAssets.map(asset => {
                           const stats = assetStats[asset.id];
-                          const assetDivs = currentBroker ? (currentBroker.dividends || []).filter(d => d.assetId === asset.id) : [];
-                          const totalDiv = assetDivs.reduce((acc, curr) => acc + (curr.dividendValue || 0) + (curr.jcpValue || 0), 0);
-                          const yieldOnCost = stats.totalInvested > 0 ? (totalDiv / stats.totalInvested) * 100 : 0;
-
+                          const assetDivs = currentBroker ? (currentBroker.dividends || []).filter(d => d.asset_id === asset.id) : [];
+                          const totalDiv = assetDivs.reduce((acc, curr) => acc + (curr.dividend_value || 0) + (curr.jcp_value || 0), 0);
+                          
                           return (
-                            <div key={asset.id} className="print-break-inside-avoid">
-                              <Card className="print:shadow-none print:border-slate-300">
-                                <div className="p-4">
-                                <div className="flex justify-between items-start mb-4">
-                                  <div>
-                                    <h4 className="font-bold text-slate-900 text-lg">{asset.name}</h4>
-                                    <p className="text-sm text-slate-500 font-mono">{asset.code} | {asset.cnpj || 'CNPJ não informado'}</p>
+                            <Card key={asset.id} className="p-6 border-l-4 border-l-blue-500 bg-white shadow-md hover:shadow-lg transition-shadow">
+                              <div className="flex flex-col md:flex-row justify-between gap-6">
+                                <div className="space-y-4 flex-1">
+                                  <div className="flex items-center gap-3">
+                                    <div className="px-3 py-1 bg-blue-50 text-blue-700 rounded-lg font-bold text-lg border border-blue-100 uppercase tracking-wider">
+                                      {asset.code}
+                                    </div>
+                                    <h4 className="text-xl font-black text-slate-800">{asset.name}</h4>
                                   </div>
-                                  <div className="text-right">
-                                    <p className="text-xs font-bold text-slate-400 uppercase tracking-wider">Custo Total</p>
-                                    <p className="text-xl font-bold text-blue-600">{formatCurrency(stats.totalInvested)}</p>
+                                  
+                                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                                    <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
+                                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Posição Atual</p>
+                                      <p className="text-lg font-bold text-slate-900">{stats?.quantity?.toLocaleString('pt-BR')} cotas</p>
+                                    </div>
+                                    <div className="p-3 bg-blue-50 rounded-xl border border-blue-100 font-medium">
+                                      <p className="text-[10px] font-bold text-blue-400 uppercase tracking-widest mb-1">Custo Médio</p>
+                                      <p className="text-lg font-bold text-blue-900">{formatCurrency(stats?.avgPrice || 0)}</p>
+                                    </div>
+                                    <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-100 font-medium">
+                                      <p className="text-[10px] font-bold text-emerald-400 uppercase tracking-widest mb-1">Total Recebido</p>
+                                      <p className="text-lg font-bold text-emerald-900">{formatCurrency(totalDiv)}</p>
+                                    </div>
+                                    <div className="p-3 bg-indigo-50 rounded-xl border border-indigo-100 font-medium">
+                                      <p className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest mb-1">Yield on Cost</p>
+                                      <p className="text-lg font-bold text-indigo-900">{stats?.yieldOnCost?.toFixed(2)}%</p>
+                                    </div>
                                   </div>
+
+                                  {asset.cnpj && (
+                                    <div className="flex items-center gap-2 text-xs text-slate-400 font-mono">
+                                      <Building2 className="w-3 h-3" />
+                                      CNPJ: {asset.cnpj}
+                                    </div>
+                                  )}
                                 </div>
                                 
-                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 py-4 border-y border-slate-100 mb-4">
-                                  <div>
-                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Quantidade Atual</p>
-                                    <p className="text-sm font-semibold text-slate-700">{stats.quantity.toLocaleString('pt-BR')}</p>
+                                <div className="md:w-64 pt-4 md:pt-0 flex flex-col justify-center border-t md:border-t-0 md:border-l border-slate-100 md:pl-6">
+                                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Investimento Total</p>
+                                  <p className="text-2xl font-black text-slate-900">{formatCurrency(stats?.totalInvested || 0)}</p>
+                                  <div className="mt-4 pt-4 border-t border-slate-100 space-y-2">
+                                    <div className="flex justify-between text-xs">
+                                      <span className="text-slate-500">Cotas Compradas:</span>
+                                      <span className="font-bold text-slate-700">{stats?.boughtQuantity?.toLocaleString('pt-BR')}</span>
+                                    </div>
+                                    <div className="flex justify-between text-xs">
+                                      <span className="text-slate-500">Cotas Vendidas:</span>
+                                      <span className="font-bold text-slate-700">{stats?.soldQuantity?.toLocaleString('pt-BR')}</span>
+                                    </div>
                                   </div>
-                                  <div>
-                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Preço Médio</p>
-                                    <p className="text-sm font-semibold text-slate-700">{formatCurrency(stats.avgPrice)}</p>
-                                  </div>
-                                  <div>
-                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Rendimentos Totais</p>
-                                    <p className="text-sm font-semibold text-emerald-600">{formatCurrency(totalDiv)}</p>
-                                  </div>
-                                  <div>
-                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Yield on Cost</p>
-                                    <p className="text-sm font-semibold text-blue-600">{yieldOnCost.toFixed(2)}%</p>
-                                  </div>
-                                </div>
-
-                                <div className="bg-slate-50 p-4 rounded-xl border border-slate-100">
-                                  <div className="flex items-center gap-2 mb-2">
-                                    <FileText className="w-4 h-4 text-slate-400" />
-                                    <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Discriminação para Bens e Direitos (IRPF)</p>
-                                  </div>
-                                  <p className="text-sm text-slate-600 leading-relaxed italic">
-                                    "{getBensEDireitosDescription(asset, stats)}"
-                                  </p>
                                 </div>
                               </div>
                             </Card>
-                          </div>
-                        );
-                      })}
+                          );
+                        })}
                       </div>
                     </div>
                   );
@@ -2486,7 +2426,7 @@ export default function App() {
                                     <div className="space-y-2">
                                       <div>
                                         <p className="text-[10px] font-bold text-slate-400 uppercase">Situação em 31/12/2023</p>
-                                        <p className="text-lg font-bold text-slate-900">{formatCurrency(item.previousValue || 0)}</p>
+                                        <p className="text-lg font-bold text-slate-900">{formatCurrency(item.previous_value || 0)}</p>
                                       </div>
                                       <div>
                                         <p className="text-[10px] font-bold text-slate-400 uppercase">Situação em 31/12/2024</p>
@@ -2626,7 +2566,7 @@ export default function App() {
       >
         <form id="transaction-form" onSubmit={handleSaveTransaction} className="space-y-4">
           <Select 
-            name="assetId" 
+            name="asset_id" 
             label="Ativo" 
             options={currentBroker ? (currentBroker.assets || []).map(a => ({ label: `${a.code} - ${a.name}`, value: a.id })) : []} 
             required 
@@ -2658,15 +2598,15 @@ export default function App() {
       >
         <form id="dividend-form" onSubmit={handleSaveDividend} className="space-y-4">
           <Select 
-            name="assetId" 
+            name="asset_id" 
             label="Ativo" 
             options={currentBroker ? (currentBroker.assets || []).map(a => ({ label: `${a.code} - ${a.name}`, value: a.id })) : []} 
             required 
           />
           <Input name="date" label="Data de Pagamento" type="date" defaultValue={format(new Date(), 'yyyy-MM-dd')} required />
           <div className="grid grid-cols-2 gap-4">
-            <Input name="dividendValue" label="Dividendos (R$)" type="number" step="0.01" placeholder="0,00" />
-            <Input name="jcpValue" label="JCP (R$)" type="number" step="0.01" placeholder="0,00" />
+            <Input name="dividend_value" label="Dividendos (R$)" type="number" step="0.01" placeholder="0,00" />
+            <Input name="jcp_value" label="JCP (R$)" type="number" step="0.01" placeholder="0,00" />
           </div>
         </form>
       </Modal>

@@ -20,7 +20,18 @@ export const ASSET_COLORS: Record<AssetType, string> = {
 
 export const APP_CHANGELOG = [
   {
-    version: '1.2.0',
+    version: '1.4.0',
+    date: '2026-03-29',
+    updates: [
+      'Extração Inteligente: Nomes reais dos ativos agora são puxados via IA',
+      'Categorização Dinâmica: Fim da lógica manual de tipos por ticker',
+      'Yield on Cost: Adicionado cálculo de rendimento real sobre custo médio',
+      'Relatório Premium: Design de portfólio renovado com CNPJ e análises por ativo',
+      'Suporte IRPF Expandido: Melhor detecção de rendimentos tributáveis pessoais'
+    ]
+  },
+  {
+    version: '1.3.0',
     date: '2026-03-29',
     updates: [
       'Modelo da IA atualizado para Gemini 2.5 Flash (Estabilidade e Cota)',
