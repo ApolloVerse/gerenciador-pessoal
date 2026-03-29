@@ -20,6 +20,16 @@ export const ASSET_COLORS: Record<AssetType, string> = {
 
 export const APP_CHANGELOG = [
   {
+    version: '1.2.0',
+    date: '2026-03-29',
+    updates: [
+      'Modelo da IA atualizado para Gemini 2.5 Flash (Estabilidade e Cota)',
+      'Melhoria na extração de texto de PDF (Preservação de quebras de linha)',
+      'Refinamento do Prompt para melhor detecção de ativos brasileiros',
+      'Correção de erros de autenticação (403 Leaked Key) com novas chaves'
+    ]
+  },
+  {
     version: '1.1.0',
     date: '2026-03-29',
     updates: [
