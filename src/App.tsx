@@ -1144,8 +1144,19 @@ export default function App() {
         console.log(`Extraindo texto da página ${i}...`);
         const page = await pdf.getPage(i);
         const textContent = await page.getTextContent();
-        const pageText = textContent.items.map((item: any) => item.str).join(" ");
-        fullText += pageText + "\n";
+        
+        // Melhoria na extração: preservando a estrutura básica de linhas
+        let lastY;
+        let pageText = "";
+        for (const item of textContent.items as any[]) {
+          if (lastY !== undefined && Math.abs(item.transform[5] - lastY) > 5) {
+            pageText += "\n";
+          }
+          pageText += item.str + " ";
+          lastY = item.transform[5];
+        }
+        
+        fullText += pageText + "\n--- NOVA PÁGINA ---\n";
       }
 
       if (!fullText.trim()) {
@@ -1187,25 +1198,22 @@ export default function App() {
     const ai = new GoogleGenAI({ apiKey: apiKey.trim() });
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash",
-      contents: `Você é um especialista em mercado financeiro brasileiro e contabilidade para Imposto de Renda. 
-      Analise o texto extraído de um documento financeiro (Nota de Corretagem, Extrato de Rendimentos, Informe de Rendimentos, etc.) e extraia todas as operações relevantes.
+      contents: `Você é um especialista em mercado financeiro brasileiro e contabilidade para Imposto de Renda (IRPF). 
+      Analise o texto extraído de um documento financeiro (Nota de Corretagem, Extrato de Custódia, Informe de Rendimentos, etc.) e extraia todas as operações e proventos.
+      
+      ESPERE: O texto pode estar ligeiramente desorganizado devido à extração de PDF. Use sua inteligência para identificar tabelas de NEGÓCIOS REALIZADOS ou RENDIMENTOS PAGOS.
       
       Tipos de dados a extrair:
-      1. TRANSAÇÕES: Compra e venda de ativos (Ações, FIIs, BDRs, etc.).
+      1. TRANSAÇÕES: Compra e venda de ativos (Ações, FIIs, BDRs, ETFs, Opções).
       2. RENDIMENTOS: Dividendos, Juros sobre Capital Próprio (JCP), Rendimentos de FIIs.
       
-      Regras para TRANSAÇÕES:
-      - Identifique a DATA DO PREGÃO (YYYY-MM-DD).
-      - Identifique o CÓDIGO DO ATIVO (Ticker).
-      - Identifique se é 'Compra' ou 'Venda'.
-      - Extraia QUANTIDADE e PREÇO UNITÁRIO.
+      Regras de Ouro:
+      - DATA: Sempre no formato YYYY-MM-DD.
+      - ATIVO: Use o ticker (ex: PETR4, IVVB11, HGLG11). Se não houver ticker, use o nome reduzido.
+      - TIPO: 'Compra' (ou C) ou 'Venda' (ou V).
+      - VALORES: Use números decimais (ponto para decimal, sem separador de milhar).
       
-      Regras para RENDIMENTOS:
-      - Identifique a DATA DO PAGAMENTO ou DATA COM (YYYY-MM-DD).
-      - Identifique o CÓDIGO DO ATIVO (Ticker).
-      - Identifique o VALOR de Dividendos e o VALOR de JCP separadamente se possível.
-      
-      Retorne um objeto JSON com dois arrays: "transactions" e "dividends".
+      Retorne um objeto JSON estritamente no esquema fornecido. Se não encontrar nada, retorne arrays vazios, mas esforce-se para identificar padrões de corretoras como XP, BTG, Itaú, NuInvest, Inter, etc.
       
       Texto do documento:
       ${text}`,
@@ -1352,8 +1360,21 @@ export default function App() {
       for (let i = 1; i <= pdf.numPages; i++) {
         const page = await pdf.getPage(i);
         const textContent = await page.getTextContent();
-        const pageText = textContent.items.map((item: any) => item.str).join(" ");
-        fullText += pageText + "\n";
+        
+        let lastY;
+        let pageText = "";
+        for (const item of textContent.items as any[]) {
+          if (lastY !== undefined && Math.abs(item.transform[5] - lastY) > 5) {
+            pageText += "\n";
+          }
+          pageText += item.str + " ";
+          lastY = item.transform[5];
+        }
+        fullText += pageText + "\n--- NOVA PÁGINA ---\n";
+      }
+
+      if (!fullText.trim() || fullText.length < 50) {
+        throw new Error('O Informe de Rendimentos parece estar vazio ou é uma imagem não legível.');
       }
 
       const irpfData = await extractIrpfDataFromPdf(fullText);
