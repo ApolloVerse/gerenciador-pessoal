@@ -449,9 +449,11 @@ export default function App() {
 
   const assetStats = useMemo(() => {
     if (!currentBroker) return {};
-    const stats: Record<string, { 
+    const results: Record<string, { 
       quantity: number; 
       totalInvested: number; 
+      avgPrice: number;
+      boughtQuantity: number;
       soldQuantity: number;
       quantity2023: number;
       totalInvested2023: number;
@@ -460,7 +462,7 @@ export default function App() {
     }> = {};
 
     (currentBroker.assets || []).forEach(asset => {
-      const stats: any = {
+      const itemStats: any = {
         quantity: 0,
         totalInvested: 0,
         avgPrice: 0,
@@ -479,40 +481,40 @@ export default function App() {
       transactions.forEach(t => {
         const isBefore2024 = t.date && t.date < '2024-01-01';
         if (t.type === 'Compra') {
-          stats.boughtQuantity += t.quantity;
-          const newQuantity = stats.quantity + t.quantity;
-          const newTotalInvested = stats.totalInvested + (t.quantity * t.price);
-          stats.quantity = newQuantity;
-          stats.totalInvested = newTotalInvested;
-          stats.avgPrice = stats.quantity > 0 ? stats.totalInvested / stats.quantity : 0;
+          itemStats.boughtQuantity += t.quantity;
+          const newQuantity = itemStats.quantity + t.quantity;
+          const newTotalInvested = itemStats.totalInvested + (t.quantity * t.price);
+          itemStats.quantity = newQuantity;
+          itemStats.totalInvested = newTotalInvested;
+          itemStats.avgPrice = itemStats.quantity > 0 ? itemStats.totalInvested / itemStats.quantity : 0;
         } else {
-          stats.soldQuantity += t.quantity;
+          itemStats.soldQuantity += t.quantity;
           const saleQuantity = Math.abs(t.quantity);
-          if (stats.quantity > 0) {
-            const ratio = (stats.quantity - saleQuantity) / stats.quantity;
-            stats.quantity = Math.max(0, stats.quantity - saleQuantity);
-            stats.totalInvested = stats.quantity > 0 ? stats.totalInvested * ratio : 0;
+          if (itemStats.quantity > 0) {
+            const ratio = (itemStats.quantity - saleQuantity) / itemStats.quantity;
+            itemStats.quantity = Math.max(0, itemStats.quantity - saleQuantity);
+            itemStats.totalInvested = itemStats.quantity > 0 ? itemStats.totalInvested * ratio : 0;
           } else {
-            stats.quantity = 0;
-            stats.totalInvested = 0;
-            stats.avgPrice = 0;
+            itemStats.quantity = 0;
+            itemStats.totalInvested = 0;
+            itemStats.avgPrice = 0;
           }
         }
 
         if (isBefore2024) {
-          stats.quantity2023 = stats.quantity;
-          stats.totalInvested2023 = stats.totalInvested;
+          itemStats.quantity2023 = itemStats.quantity;
+          itemStats.totalInvested2023 = itemStats.totalInvested;
         }
       });
 
       // Calcular Yield on Cost
       const dividends = (currentBroker.dividends || []).filter(d => d.asset_id === asset.id);
-      stats.totalDividends = dividends.reduce((acc, curr) => acc + curr.dividend_value + curr.jcp_value, 0);
-      stats.yieldOnCost = stats.totalInvested > 0 ? (stats.totalDividends / stats.totalInvested) * 100 : 0;
+      itemStats.totalDividends = dividends.reduce((acc, curr) => acc + curr.dividend_value + curr.jcp_value, 0);
+      itemStats.yieldOnCost = itemStats.totalInvested > 0 ? (itemStats.totalDividends / itemStats.totalInvested) * 100 : 0;
 
-      stats[asset.id] = stats;
+      results[asset.id] = itemStats;
     });
-    return stats;
+    return results;
   }, [currentBroker]);
 
   const formatCurrency = (val: number) => {
@@ -1145,7 +1147,7 @@ export default function App() {
 
     const ai = new GoogleGenAI({ apiKey: apiKey.trim() });
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: "gemini-1.5-flash",
       contents: `Você é um especialista em mercado financeiro brasileiro. Analise o documento financeiro (Nota de Corretagem ou Informe de Rendimentos) e extraia TODOS os dados relevantes.
       
       Regras de Extração:
@@ -1321,7 +1323,7 @@ export default function App() {
 
     const ai = new GoogleGenAI({ apiKey: apiKey.trim() });
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: "gemini-1.5-flash",
       contents: `Você é um especialista em IRPF (Imposto de Renda Pessoa Física) do Brasil.
       Analise o Informe de Rendimentos fornecido e extraia TODOS os dados para a declaração anual.
       O objetivo é capturar tanto RENDIMENTOS DE INVESTIMENTOS quanto RENDIMENTOS PESSOAIS (Salários, Aluguéis, etc.).
