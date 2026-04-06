@@ -6,23 +6,28 @@ export interface Asset {
   name: string;
   code: string;
   cnpj?: string;
+  corporateName?: string;
+  currentPrice?: number;
+  lastPriceUpdate?: string; // ISO date string
 }
 
 export interface Transaction {
   id: string;
   date: string;
-  asset_id: string; // Changed from assetId
+  assetId: string;
   quantity: number;
   price: number;
   type: 'Compra' | 'Venda';
+  source?: 'Manual' | 'Nota de Corretagem' | 'Informe de Rendimentos' | 'Extrato de Custódia';
 }
 
 export interface Dividend {
   id: string;
   date: string;
-  asset_id: string; // Changed from assetId
-  dividend_value: number; // Changed from dividendValue
-  jcp_value: number; // Changed from jcpValue
+  assetId: string;
+  dividendValue: number;
+  jcpValue: number;
+  source?: 'Manual' | 'Informe de Rendimentos' | 'Extrato de Custódia';
 }
 
 export interface IrpfItem {
@@ -40,8 +45,10 @@ export interface IrpfItem {
   description: string;
   cnpj?: string;
   value: number;
-  previous_value?: number; // Changed from previousValue
-  asset_code?: string; // Changed from assetCode
+  previousValue?: number;
+  assetCode?: string;
+  year?: string;
+  isDeclared?: boolean;
 }
 
 export interface Broker {
@@ -52,9 +59,22 @@ export interface Broker {
   transactions: Transaction[];
   dividends: Dividend[];
   irpfItems?: IrpfItem[];
+  declaredItemIds?: string[];
+}
+
+export interface DataSnapshot {
+  id: string;
+  version: string;
+  date: string;
+  data: Broker[];
+  label?: string;
 }
 
 export interface AppData {
   brokers: Broker[];
   currentBrokerId: string | null;
+  snapshots?: DataSnapshot[];
+  lastBackupPrompt?: string; // ISO date string
+  isEncrypted?: boolean;
+  passwordHash?: string;
 }

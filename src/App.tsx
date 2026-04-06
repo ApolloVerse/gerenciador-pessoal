@@ -21,6 +21,10 @@ import {
   ShieldCheck,
   FileCheck,
   Info,
+  Settings,
+  RefreshCw,
+  Star,
+  Check,
   X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -39,17 +43,16 @@ import {
   Bar,
   Legend
 } from 'recharts';
-import { format, parseISO, startOfMonth, endOfMonth, eachMonthOfInterval, subMonths } from 'date-fns';
+import { format, parseISO, startOfMonth, endOfMonth, eachMonthOfInterval, subMonths, isValid } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.mjs?url';
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import { cn } from './lib/utils';
-import { Asset, AssetType, Transaction, Dividend, Broker, AppData } from './types';
-import { ASSET_TYPES, ASSET_COLORS } from './constants';
-import { supabase } from './lib/supabase';
-import { Login } from './components/Login';
-import pkg from '../package.json';
+import { Asset, AssetType, Transaction, Dividend, Broker, AppData, DataSnapshot, IrpfItem } from './types';
+import { ASSET_TYPES, ASSET_COLORS, APP_VERSION, APP_CHANGELOG } from './constants';
+import { encryptData, decryptData, hashPassword } from './lib/crypto';
+import { fetchB3CompanyInfo } from './services/b3Service';
 
 const IRPF_CODES: Record<AssetType, { group: string; code: string }> = {
   'Ação': { group: '03', code: '01' },
@@ -60,11 +63,8 @@ const IRPF_CODES: Record<AssetType, { group: string; code: string }> = {
   'Crypto': { group: '08', code: '01' },
 };
 
-// Configure PDF.js worker using the local bundled worker
-if (typeof window !== 'undefined' && pdfjsLib.GlobalWorkerOptions) {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
-}
-
+// Configure PDF.js worker using the local bundled worker to avoid version mismatch
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 // --- Components ---
 
@@ -107,14 +107,14 @@ const Button = ({
   );
 };
 
-const Card = ({ children, className, title, description, footer, ...props }: { 
+const Card = ({ children, className, title, description, footer }: { 
   children: React.ReactNode; 
   className?: string;
   title?: string;
   description?: string;
   footer?: React.ReactNode;
-} & React.HTMLAttributes<HTMLDivElement>) => (
-  <div className={cn('bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden', className)} {...props}>
+}) => (
+  <div className={cn('bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden', className)}>
     {(title || description) && (
       <div className="px-6 py-4 border-bottom border-slate-100">
         {title && <h3 className="text-lg font-semibold text-slate-900">{title}</h3>}
@@ -221,12 +221,13 @@ const TabButton = ({ active, onClick, icon, label }: { active: boolean; onClick:
   </button>
 );
 
-const StatCard = ({ title, value, icon, color }: { title: string; value: string; icon: React.ReactNode; color: 'blue' | 'emerald' | 'amber' | 'violet' }) => {
+const StatCard = ({ title, value, icon, color }: { title: string; value: string; icon: React.ReactNode; color: 'blue' | 'emerald' | 'amber' | 'violet' | 'indigo' }) => {
   const colors = {
     blue: 'bg-blue-50 border-blue-100',
     emerald: 'bg-emerald-50 border-emerald-100',
     amber: 'bg-amber-50 border-amber-100',
     violet: 'bg-violet-50 border-violet-100',
+    indigo: 'bg-indigo-50 border-indigo-100',
   };
   return (
     <Card className={cn("p-6 border-l-4", colors[color])}>
@@ -304,94 +305,122 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 
 export default function App() {
   console.log("App component rendering");
-  const [user, setUser] = useState<any>(null);
-  const [authLoading, setAuthLoading] = useState(true);
-  const [syncLoading, setSyncLoading] = useState(false);
-  const [data, setData] = useState<AppData>({ brokers: [], currentBrokerId: null });
+  const [data, setData] = useState<AppData>(() => {
+    const defaultValue: AppData = { brokers: [], currentBrokerId: null };
+    try {
+      const saved = localStorage.getItem('lino_invest_data');
+      if (!saved) return defaultValue;
+      
+      const parsed = JSON.parse(saved);
+      if (!parsed || typeof parsed !== 'object') return defaultValue;
 
-  // Auth Listener
-  useEffect(() => {
-    console.log("Supabase Client Status:", supabase ? "Ready" : "Not Configured");
-    
-    if (!supabase) {
-      setAuthLoading(false);
-      return;
+      // If it's encrypted, we return the structure but we'll need to unlock it
+      if (parsed.isEncrypted) {
+        return parsed;
+      }
+      
+      const brokers = Array.isArray(parsed.brokers) ? parsed.brokers : [];
+      
+      // Migration: ensure arrays exist for all brokers
+      const migratedBrokers = brokers.map((b: any) => ({
+        ...b,
+        assets: Array.isArray(b.assets) ? b.assets : [],
+        transactions: Array.isArray(b.transactions) ? b.transactions : [],
+        dividends: Array.isArray(b.dividends) ? b.dividends : [],
+        irpfItems: Array.isArray(b.irpfItems) ? b.irpfItems : []
+      }));
+      
+      return {
+        ...parsed,
+        brokers: migratedBrokers,
+        currentBrokerId: parsed.currentBrokerId || (migratedBrokers[0]?.id || null)
+      };
+    } catch (e) {
+      console.error('Erro ao carregar dados do localStorage:', e);
+      return defaultValue;
     }
-    
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      console.log("Initial Session Fetch:", session?.user ? "Authenticated" : "Not Authenticated");
-      setUser(session?.user ?? null);
-      setAuthLoading(false);
-    });
+  });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      console.log("Auth State Changed:", _event, session?.user ? "User Present" : "No User");
-      setUser(session?.user ?? null);
-    });
+  const [isLocked, setIsLocked] = useState(false);
+  const [masterPassword, setMasterPassword] = useState('');
+  const [isSettingPassword, setIsSettingPassword] = useState(false);
 
-    return () => subscription.unsubscribe();
+  useEffect(() => {
+    if (data.isEncrypted && !masterPassword) {
+      setIsLocked(true);
+    }
   }, []);
 
-  // Fetch data from Supabase
-  const fetchData = async () => {
-    if (!user || !supabase) return;
-    setSyncLoading(true);
-    try {
-      const { data: brokers, error: bError } = await supabase.from('brokers').select('*');
-      if (bError) throw bError;
-
-      const fullBrokers = await Promise.all(brokers.map(async (broker) => {
-        const [assets, transactions, dividends, irpfItems] = await Promise.all([
-          supabase.from('assets').select('*').eq('broker_id', broker.id),
-          supabase.from('transactions').select('*').eq('broker_id', broker.id),
-          supabase.from('dividends').select('*').eq('broker_id', broker.id),
-          supabase.from('irpf_items').select('*').eq('broker_id', broker.id),
-        ]);
-
-        return {
-          ...broker,
-          assets: assets.data || [],
-          transactions: transactions.data || [],
-          dividends: dividends.data || [],
-          irpfItems: irpfItems.data || []
-        };
-      }));
-
-      setData({
-        brokers: fullBrokers,
-        currentBrokerId: fullBrokers[0]?.id || null
-      });
-    } catch (err) {
-      console.error('Erro ao buscar dados do Supabase:', err);
-      showNotify('Erro ao carregar dados', 'error');
-    } finally {
-      setSyncLoading(false);
-    }
-  };
-
   useEffect(() => {
-    if (user) {
-      fetchData();
-    } else {
-      setData({ brokers: [], currentBrokerId: null });
-    }
-  }, [user]);
+    const saveData = async () => {
+      if (data.isEncrypted && masterPassword) {
+        try {
+          // Encrypt sensitive parts
+          const sensitiveData = JSON.stringify({
+            brokers: data.brokers,
+            snapshots: data.snapshots,
+            currentBrokerId: data.currentBrokerId
+          });
+          const encryptedPayload = await encryptData(sensitiveData, masterPassword);
+          
+          const wrapper = {
+            isEncrypted: true,
+            passwordHash: data.passwordHash,
+            lastBackupPrompt: data.lastBackupPrompt,
+            payload: encryptedPayload
+          };
+          localStorage.setItem('lino_invest_data', JSON.stringify(wrapper));
+        } catch (e) {
+          console.error('Erro ao salvar dados criptografados:', e);
+        }
+      } else if (!data.isEncrypted) {
+        localStorage.setItem('lino_invest_data', JSON.stringify(data));
+      }
+    };
+
+    saveData();
+  }, [data, masterPassword]);
 
   const [activeTab, setActiveTab] = useState<'assets' | 'transactions' | 'dividends' | 'analysis' | 'report' | 'irpf'>('assets');
   const [isAssetModalOpen, setIsAssetModalOpen] = useState(false);
+  const [isTransactionHistoryOpen, setIsTransactionHistoryOpen] = useState(false);
+  const [selectedAssetForHistory, setSelectedAssetForHistory] = useState<Asset | null>(null);
   const [isTransactionModalOpen, setIsTransactionModalOpen] = useState(false);
   const [isDividendModalOpen, setIsDividendModalOpen] = useState(false);
   const [isBrokerModalOpen, setIsBrokerModalOpen] = useState(false);
   const [isCnpjModalOpen, setIsCnpjModalOpen] = useState(false);
   const [isPdfModalOpen, setIsPdfModalOpen] = useState(false);
   const [isIrpfPdfModalOpen, setIsIrpfPdfModalOpen] = useState(false);
+  const [isIrpfModalOpen, setIsIrpfModalOpen] = useState(false);
+  const [selectedIrpfItem, setSelectedIrpfItem] = useState<IrpfItem | null>(null);
+  const [irpfForm, setIrpfForm] = useState({
+    topic: 'Bens e Direitos',
+    group: '',
+    code: '',
+    description: '',
+    cnpj: '',
+    value: 0,
+    previousValue: 0,
+    ticker: ''
+  });
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+  const [isSnapshotModalOpen, setIsSnapshotModalOpen] = useState(false);
+  const [isChangelogModalOpen, setIsChangelogModalOpen] = useState(false);
+  const [assetFilterType, setAssetFilterType] = useState<string>('all');
+  const [userApiKey, setUserApiKey] = useState(localStorage.getItem('USER_GEMINI_API_KEY') || '');
   const [isProcessingPdf, setIsProcessingPdf] = useState(false);
+  const [processingProgress, setProcessingProgress] = useState(0);
+  const [processingStatus, setProcessingStatus] = useState('');
+  const [isAutoFillingCnpjs, setIsAutoFillingCnpjs] = useState(false);
+  const [isUpdatingPrices, setIsUpdatingPrices] = useState(false);
   const [editingAsset, setEditingAsset] = useState<Asset | null>(null);
 
   const [confirmModal, setConfirmModal] = useState<{
     isOpen: boolean;
     title: string;
     message: string;
+    confirmText?: string;
+    variant?: 'danger' | 'primary' | 'success';
     onConfirm: () => void;
   }>({
     isOpen: false,
@@ -406,6 +435,7 @@ export default function App() {
   const [filterMonth, setFilterMonth] = useState<string>('all');
   const [filterDay, setFilterDay] = useState<string>('all');
   const [filterType, setFilterType] = useState<string>('all');
+  const [filterSource, setFilterSource] = useState<string>('all');
   const [dividendFilterAsset, setDividendFilterAsset] = useState<string>('all');
   const [dividendFilterType, setDividendFilterType] = useState<string>('all');
   const [dividendFilterYear, setDividendFilterYear] = useState<string>('all');
@@ -413,8 +443,66 @@ export default function App() {
   const [reportSearchTerm, setReportSearchTerm] = useState('');
   const [reportFilterType, setReportFilterType] = useState<string>('all');
   const [irpfFilterTopic, setIrpfFilterTopic] = useState<string>('all');
+  const [irpfYear, setIrpfYear] = useState<string>((new Date().getFullYear() - 1).toString());
   const [sortField, setSortField] = useState<string>('code');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
+
+  useEffect(() => {
+    if (isIrpfModalOpen) {
+      if (selectedIrpfItem) {
+        setIrpfForm({
+          topic: selectedIrpfItem.topic || 'Bens e Direitos',
+          group: selectedIrpfItem.group || '',
+          code: selectedIrpfItem.code || '',
+          description: selectedIrpfItem.description || '',
+          cnpj: selectedIrpfItem.cnpj || '',
+          value: selectedIrpfItem.value || 0,
+          previousValue: selectedIrpfItem.previousValue || 0,
+          ticker: ''
+        });
+      } else {
+        setIrpfForm({
+          topic: 'Bens e Direitos',
+          group: '',
+          code: '',
+          description: '',
+          cnpj: '',
+          value: 0,
+          previousValue: 0,
+          ticker: ''
+        });
+      }
+    }
+  }, [selectedIrpfItem, isIrpfModalOpen]);
+
+  const handleIrpfTickerChange = (ticker: string) => {
+    const normalizedTicker = ticker.trim().toUpperCase();
+    setIrpfForm(prev => ({ ...prev, ticker: normalizedTicker }));
+    
+    if (!currentBroker) return;
+    
+    const asset = (currentBroker.assets || []).find(a => a.code.trim().toUpperCase() === normalizedTicker);
+    if (asset) {
+      const codes = IRPF_CODES[asset.type] || { group: '99', code: '99' };
+      const stats = assetStats[asset.id] || { quantityCurrentYear: 0, avgPrice: 0, totalInvestedCurrentYear: 0, totalInvestedPreviousYear: 0 };
+      const calendarYear = parseInt(irpfYear);
+      
+      let description = irpfForm.description;
+      if (irpfForm.topic === 'Bens e Direitos') {
+        description = getBensEDireitosDescription(asset, stats, calendarYear);
+      }
+      
+      setIrpfForm(prev => ({
+        ...prev,
+        group: codes.group,
+        code: codes.code,
+        cnpj: asset.cnpj || prev.cnpj,
+        description: description,
+        value: stats.totalInvestedCurrentYear || prev.value,
+        previousValue: stats.totalInvestedPreviousYear || prev.previousValue
+      }));
+    }
+  };
 
   const currentBroker = useMemo(() => {
     if (!data || !Array.isArray(data.brokers)) return null;
@@ -434,6 +522,7 @@ export default function App() {
     setReportSearchTerm('');
     setReportFilterType('all');
     setIrpfFilterTopic('all');
+    setAssetFilterType('all');
   }, [data.currentBrokerId]);
 
   useEffect(() => {
@@ -445,97 +534,297 @@ export default function App() {
     }
   }, [dividendFilterType, dividendFilterAsset, currentBroker]);
 
+  useEffect(() => {
+    const checkBackup = () => {
+      const lastPrompt = data.lastBackupPrompt ? new Date(data.lastBackupPrompt) : null;
+      const now = new Date();
+      
+      // If never prompted or 5 days passed (5 * 24 * 60 * 60 * 1000 ms)
+      if (!lastPrompt || (now.getTime() - lastPrompt.getTime()) > 5 * 24 * 60 * 60 * 1000) {
+        askConfirm(
+          'Backup de Segurança',
+          'Já faz algum tempo desde o seu último backup. Deseja baixar uma cópia de segurança de todos os seus dados agora para garantir que nada seja perdido?',
+          () => {
+            handleFullBackup();
+            setData(prev => ({ ...prev, lastBackupPrompt: new Date().toISOString() }));
+          },
+          'Confirmar Exportação',
+          'primary'
+        );
+        // Even if they cancel, we update the prompt date so we don't annoy them every reload
+        if (lastPrompt) {
+           setData(prev => ({ ...prev, lastBackupPrompt: new Date().toISOString() }));
+        } else {
+           // First time prompt, set it anyway
+           setData(prev => ({ ...prev, lastBackupPrompt: new Date().toISOString() }));
+        }
+      }
+    };
+
+    const timer = setTimeout(checkBackup, 3000);
+    return () => clearTimeout(timer);
+  }, [data.lastBackupPrompt]);
+
   // --- Calculations ---
+
+  const uniqueTransactions = useMemo(() => {
+    if (!currentBroker) return [];
+    const assetIdToCode = new Map<string, string>();
+    (currentBroker.assets || []).forEach(a => assetIdToCode.set(a.id, a.code.trim().toUpperCase()));
+
+    const seen = new Map<string, Transaction>();
+    const unique: Transaction[] = [];
+    
+    [...(currentBroker.transactions || [])]
+      .sort((a, b) => {
+        const dateCompare = (a.date || '').localeCompare(b.date || '');
+        if (dateCompare !== 0) return dateCompare;
+        
+        // Prioritize Nota de Corretagem over Informe de Rendimentos for the same day
+        const sourcePriority: Record<string, number> = {
+          'Nota de Corretagem': 1,
+          'Manual': 2,
+          'Extrato de Custódia': 3,
+          'Informe de Rendimentos': 4
+        };
+        const aPrio = sourcePriority[a.source as string] || 5;
+        const bPrio = sourcePriority[b.source as string] || 5;
+        if (aPrio !== bPrio) return aPrio - bPrio;
+
+        // Same day, same source: Compra before Venda to ensure correct avgPrice calculation
+        if (a.type === 'Compra' && b.type === 'Venda') return -1;
+        if (a.type === 'Venda' && b.type === 'Compra') return 1;
+        return 0;
+      })
+      .forEach(t => {
+        const code = assetIdToCode.get(t.assetId) || 'UNKNOWN';
+        const date = (t.date || '').split('T')[0];
+        const qty = Math.abs(t.quantity || 0).toFixed(4);
+        const type = t.type;
+        
+        // Key for potential duplicates (same asset, date, type, quantity)
+        const key = `${code}-${date}-${type}-${qty}`;
+        
+        const existing = seen.get(key);
+        if (existing) {
+          const sourcePriority: Record<string, number> = { 'Nota de Corretagem': 1, 'Manual': 2, 'Extrato de Custódia': 3, 'Informe de Rendimentos': 4 };
+          const existingPrio = sourcePriority[existing.source as string] || 5;
+          const currentPrio = sourcePriority[t.source as string] || 5;
+          
+          // If current is less reliable, skip it
+          if (currentPrio >= existingPrio) return;
+          
+          // If current is more reliable, remove existing from unique
+          const idx = unique.indexOf(existing);
+          if (idx !== -1) unique.splice(idx, 1);
+        }
+        
+        seen.set(key, t);
+        unique.push(t);
+      });
+    return unique;
+  }, [currentBroker]);
+
+  const uniqueDividends = useMemo(() => {
+    if (!currentBroker) return [];
+    const assetIdToCode = new Map<string, string>();
+    (currentBroker.assets || []).forEach(a => assetIdToCode.set(a.id, a.code.trim().toUpperCase()));
+
+    const seen = new Map<string, Dividend>();
+    const unique: Dividend[] = [];
+    
+    [...(currentBroker.dividends || [])]
+      .sort((a, b) => {
+        const dateCompare = (a.date || '').localeCompare(b.date || '');
+        if (dateCompare !== 0) return dateCompare;
+        
+        const sourcePriority: Record<string, number> = { 'Manual': 1, 'Extrato de Custódia': 2, 'Informe de Rendimentos': 3 };
+        const aPrio = sourcePriority[a.source as string] || 4;
+        const bPrio = sourcePriority[b.source as string] || 4;
+        return aPrio - bPrio;
+      })
+      .forEach(d => {
+        const code = assetIdToCode.get(d.assetId) || 'UNKNOWN';
+        const date = (d.date || '').split('T')[0];
+        const val = (d.dividendValue || 0).toFixed(2);
+        const jcp = (d.jcpValue || 0).toFixed(2);
+        
+        const key = `${code}-${date}-${val}-${jcp}`;
+        
+        const existing = seen.get(key);
+        if (existing) {
+          const sourcePriority: Record<string, number> = { 'Manual': 1, 'Extrato de Custódia': 2, 'Informe de Rendimentos': 3 };
+          const existingPrio = sourcePriority[existing.source as string] || 4;
+          const currentPrio = sourcePriority[d.source as string] || 4;
+          
+          if (currentPrio >= existingPrio) return;
+          
+          const idx = unique.indexOf(existing);
+          if (idx !== -1) unique.splice(idx, 1);
+        }
+        
+        seen.set(key, d);
+        unique.push(d);
+      });
+    return unique;
+  }, [currentBroker]);
 
   const assetStats = useMemo(() => {
     if (!currentBroker) return {};
-    const results: Record<string, { 
+    const stats: Record<string, { 
       quantity: number; 
       totalInvested: number; 
       avgPrice: number;
+      currentPrice: number;
+      currentValue: number;
+      profit: number;
+      profitPercentage: number;
       boughtQuantity: number;
       soldQuantity: number;
-      quantity2023: number;
-      totalInvested2023: number;
-      totalDividends: number;
-      yieldOnCost: number;
+      quantityCurrentYear: number;
+      totalInvestedCurrentYear: number;
+      quantityPreviousYear: number;
+      totalInvestedPreviousYear: number;
     }> = {};
 
-    (currentBroker.assets || []).forEach(asset => {
-      const itemStats: any = {
-        quantity: 0,
-        totalInvested: 0,
-        avgPrice: 0,
-        boughtQuantity: 0,
-        soldQuantity: 0,
-        quantity2023: 0,
-        totalInvested2023: 0,
-        totalDividends: 0,
-        yieldOnCost: 0
-      };
+    const calendarYear = parseInt(irpfYear);
+    const previousYear = calendarYear - 1;
+    const currentYearEnd = `${calendarYear}-12-31`;
+    const previousYearEnd = `${previousYear}-12-31`;
 
-      const transactions = [...(currentBroker.transactions || [])]
-        .filter(t => t.asset_id === asset.id)
-        .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+    const assetsByCode: Record<string, Asset[]> = {};
+    (currentBroker.assets || []).forEach(a => {
+      const code = a.code.trim().toUpperCase();
+      if (!assetsByCode[code]) assetsByCode[code] = [];
+      assetsByCode[code].push(a);
+    });
+
+    const assetIdToCode = new Map<string, string>();
+    (currentBroker.assets || []).forEach(a => assetIdToCode.set(a.id, a.code.trim().toUpperCase()));
+
+    Object.values(assetsByCode).forEach(assetsWithThisCode => {
+      const firstAsset = assetsWithThisCode[0];
+      const code = firstAsset.code.trim().toUpperCase();
+      
+      const transactions = uniqueTransactions
+        .filter(t => {
+          const tCode = assetIdToCode.get(t.assetId);
+          return tCode === code;
+        })
+        .sort((a, b) => {
+          const dateCompare = (a.date || '').localeCompare(b.date || '');
+          if (dateCompare !== 0) return dateCompare;
+          if (a.type === 'Compra' && b.type === 'Venda') return -1;
+          if (a.type === 'Venda' && b.type === 'Compra') return 1;
+          return 0;
+        });
+
+      let quantity = 0;
+      let totalInvested = 0;
+      let avgPrice = 0;
+      let boughtQuantity = 0;
+      let soldQuantity = 0;
+      let quantityCurrentYear = 0;
+      let totalInvestedCurrentYear = 0;
+      let quantityPreviousYear = 0;
+      let totalInvestedPreviousYear = 0;
 
       transactions.forEach(t => {
-        const isBefore2024 = t.date && t.date < '2024-01-01';
+        const absQty = Math.abs(t.quantity || 0);
+        const price = t.price || 0;
+        
         if (t.type === 'Compra') {
-          itemStats.boughtQuantity += t.quantity;
-          const newQuantity = itemStats.quantity + t.quantity;
-          const newTotalInvested = itemStats.totalInvested + (t.quantity * t.price);
-          itemStats.quantity = newQuantity;
-          itemStats.totalInvested = newTotalInvested;
-          itemStats.avgPrice = itemStats.quantity > 0 ? itemStats.totalInvested / itemStats.quantity : 0;
+          boughtQuantity += absQty;
+          const newQuantity = quantity + absQty;
+          const newTotalInvested = totalInvested + (absQty * price);
+          quantity = newQuantity;
+          totalInvested = newTotalInvested;
+          avgPrice = quantity > 0 ? totalInvested / quantity : 0;
         } else {
-          itemStats.soldQuantity += t.quantity;
-          const saleQuantity = Math.abs(t.quantity);
-          if (itemStats.quantity > 0) {
-            const ratio = (itemStats.quantity - saleQuantity) / itemStats.quantity;
-            itemStats.quantity = Math.max(0, itemStats.quantity - saleQuantity);
-            itemStats.totalInvested = itemStats.quantity > 0 ? itemStats.totalInvested * ratio : 0;
+          soldQuantity += absQty;
+          if (quantity > 0) {
+            const ratio = (quantity - absQty) / quantity;
+            quantity = Math.max(0, quantity - absQty);
+            totalInvested = quantity > 0 ? totalInvested * ratio : 0;
           } else {
-            itemStats.quantity = 0;
-            itemStats.totalInvested = 0;
-            itemStats.avgPrice = 0;
+            quantity = 0;
+            totalInvested = 0;
+            avgPrice = 0;
           }
         }
 
-        if (isBefore2024) {
-          itemStats.quantity2023 = itemStats.quantity;
-          itemStats.totalInvested2023 = itemStats.totalInvested;
+        if (t.date && t.date <= previousYearEnd) {
+          quantityPreviousYear = quantity;
+          totalInvestedPreviousYear = totalInvested;
+        }
+        if (t.date && t.date <= currentYearEnd) {
+          quantityCurrentYear = quantity;
+          totalInvestedCurrentYear = totalInvested;
         }
       });
 
-      // Calcular Yield on Cost
-      const dividends = (currentBroker.dividends || []).filter(d => d.asset_id === asset.id);
-      itemStats.totalDividends = dividends.reduce((acc, curr) => acc + curr.dividend_value + curr.jcp_value, 0);
-      itemStats.yieldOnCost = itemStats.totalInvested > 0 ? (itemStats.totalDividends / itemStats.totalInvested) * 100 : 0;
+      const currentPrice = firstAsset.currentPrice || 0;
+      const currentValue = quantity * currentPrice;
+      const profit = quantity > 0 ? currentValue - totalInvested : 0;
+      const profitPercentage = (quantity > 0 && totalInvested > 0) ? (profit / totalInvested) * 100 : 0;
 
-      results[asset.id] = itemStats;
+      const consolidatedStat = {
+        quantity,
+        totalInvested,
+        avgPrice,
+        currentPrice,
+        currentValue,
+        profit,
+        profitPercentage,
+        boughtQuantity,
+        soldQuantity,
+        quantityCurrentYear,
+        totalInvestedCurrentYear,
+        quantityPreviousYear,
+        totalInvestedPreviousYear
+      };
+
+      // Map this stat to ALL asset IDs in this group for robustness
+      assetsWithThisCode.forEach(a => {
+        stats[a.id] = consolidatedStat;
+      });
     });
-    return results;
-  }, [currentBroker]);
+
+    return stats;
+  }, [currentBroker, irpfYear, uniqueTransactions]);
 
   const formatCurrency = (val: number) => {
     return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val);
   };
 
-  const getBensEDireitosDescription = (asset: Asset, stats: any) => {
+  const getBensEDireitosDescription = (asset: Asset, stats: any, calendarYear: number) => {
     const codes = IRPF_CODES[asset.type] || { group: '99', code: '99' };
     const typeLabel = asset.type === 'Ação' ? 'Ações' : asset.type === 'FII' ? 'Cotas de Fundo de Investimento Imobiliário' : asset.type;
     const brokerCnpj = currentBroker?.cnpj ? ` (CNPJ: ${currentBroker.cnpj})` : '';
     const assetCnpj = asset.cnpj ? ` (CNPJ: ${asset.cnpj})` : '';
+    const nameToUse = asset.corporateName || asset.name;
     
-    return `DECLARAÇÃO DE BENS E DIREITOS - GRUPO ${codes.group}, CÓDIGO ${codes.code}: ${stats.quantity.toLocaleString('pt-BR')} ${typeLabel} de ${asset.name}${assetCnpj} (${asset.code}), custodiadas na corretora ${currentBroker?.name}${brokerCnpj}. Custo médio de aquisição: ${formatCurrency(stats.avgPrice)}. Total investido: ${formatCurrency(stats.totalInvested)}.`;
+    return `${stats.quantityCurrentYear.toLocaleString('pt-BR')} ${typeLabel} de ${asset.code} - ${nameToUse}${assetCnpj}, custodiadas na corretora ${currentBroker?.name}${brokerCnpj}. Custo médio de aquisição: ${formatCurrency(stats.avgPrice)}. Situação em 31/12/${calendarYear - 1}: ${formatCurrency(stats.totalInvestedPreviousYear || 0)}. Situação em 31/12/${calendarYear}: ${formatCurrency(stats.totalInvestedCurrentYear || 0)}.`;
   };
 
   const allIrpfItems = useMemo(() => {
     if (!currentBroker) return [];
+    
     const items: any[] = [];
-    (currentBroker.assets || []).forEach(asset => {
+    const calendarYear = parseInt(irpfYear);
+    
+    // Group assets by code for IRPF
+    const uniqueAssetsMap = new Map<string, Asset>();
+    (currentBroker.assets || []).forEach(a => {
+      const code = a.code.trim().toUpperCase();
+      if (!uniqueAssetsMap.has(code)) uniqueAssetsMap.set(code, a);
+    });
+    const uniqueAssets = Array.from(uniqueAssetsMap.values());
+    
+    // 1. Bens e Direitos from Assets
+    uniqueAssets.forEach(asset => {
       const stats = assetStats[asset.id];
-      if (stats && stats.quantity > 0) {
+      if (stats && (stats.quantityCurrentYear > 0 || stats.quantityPreviousYear > 0)) {
         const codes = IRPF_CODES[asset.type] || { group: '99', code: '99' };
         items.push({
           id: `auto-bens-${asset.id}`,
@@ -543,90 +832,150 @@ export default function App() {
           ficha: 'Bens e Direitos',
           group: codes.group,
           code: codes.code,
-          description: getBensEDireitosDescription(asset, stats),
-          value: stats.totalInvested,
-          previous_value: stats.totalInvested2023,
-          cnpj: asset.cnpj || currentBroker.cnpj
+          description: getBensEDireitosDescription(asset, stats, calendarYear),
+          value: stats.totalInvestedCurrentYear,
+          previousValue: stats.totalInvestedPreviousYear,
+          cnpj: asset.cnpj || currentBroker.cnpj,
+          guide: `Declare no grupo ${codes.group} e código ${codes.code}. No campo 'Discriminação', informe a quantidade, o nome do ativo, o CNPJ da empresa e a corretora onde estão custodiados.`
         });
       }
     });
 
-    const dividendsByAsset: Record<string, { dividend: number; jcp: number }> = {};
+    // 2. Rendimentos from Dividends
+    const dividendsByAssetCode: Record<string, { dividend: number; jcp: number }> = {};
+    const calendarYearStr = calendarYear.toString();
+    
+    // Map asset IDs to codes for dividend grouping
+    const assetIdToCode = new Map<string, string>();
+    (currentBroker.assets || []).forEach(a => assetIdToCode.set(a.id, a.code.trim().toUpperCase()));
+
     (currentBroker.dividends || []).forEach(div => {
-      if (!dividendsByAsset[div.asset_id]) {
-        dividendsByAsset[div.asset_id] = { dividend: 0, jcp: 0 };
+      if (div.date.startsWith(calendarYearStr)) {
+        const code = assetIdToCode.get(div.assetId);
+        if (code) {
+          if (!dividendsByAssetCode[code]) {
+            dividendsByAssetCode[code] = { dividend: 0, jcp: 0 };
+          }
+          dividendsByAssetCode[code].dividend += div.dividendValue || 0;
+          dividendsByAssetCode[code].jcp += div.jcpValue || 0;
+        }
       }
-      dividendsByAsset[div.asset_id].dividend += div.dividend_value || 0;
-      dividendsByAsset[div.asset_id].jcp += div.jcp_value || 0;
     });
 
-    Object.entries(dividendsByAsset).forEach(([asset_id, values]) => {
-      const asset = (currentBroker.assets || []).find(a => a.id === asset_id);
+    Object.entries(dividendsByAssetCode).forEach(([code, values]) => {
+      const asset = uniqueAssets.find(a => a.code.trim().toUpperCase() === code);
       if (!asset) return;
 
       if (values.dividend > 0) {
         const code = asset.type === 'Ação' ? '09' : '26';
+        const nameToUse = asset.corporateName || asset.name;
+        const description = `Rendimentos isentos de ${nameToUse} (${asset.code}) - ${currentBroker.name}`;
         items.push({
-          id: `auto-div-${asset_id}`,
+          id: `auto-div-${asset.id}`,
           topic: 'Rendimentos Isentos',
           ficha: 'Rendimentos Isentos e Não Tributáveis',
           code: code,
-          description: `Rendimentos isentos de ${asset.name} (${asset.code}) - ${currentBroker.name}`,
+          description: description,
           value: values.dividend,
-          cnpj: asset.cnpj || currentBroker.cnpj
+          cnpj: asset.cnpj || currentBroker.cnpj,
+          guide: `Declare na ficha 'Rendimentos Isentos e Não Tributáveis', sob o código ${code}. Informe o CNPJ da fonte pagadora e o valor total recebido no ano.`
         });
       }
 
       if (values.jcp > 0) {
+        const nameToUse = asset.corporateName || asset.name;
+        const description = `Juros sobre Capital Próprio de ${nameToUse} (${asset.code}) - ${currentBroker.name}`;
         items.push({
-          id: `auto-jcp-${asset_id}`,
+          id: `auto-jcp-${asset.id}`,
           topic: 'Rendimentos Sujeitos à Tributação Exclusiva',
           ficha: 'Rendimentos Sujeitos à Tributação Exclusiva/Definitiva',
           code: '10',
-          description: `Juros sobre Capital Próprio de ${asset.name} (${asset.code}) - ${currentBroker.name}`,
+          description: description,
           value: values.jcp,
-          cnpj: asset.cnpj || currentBroker.cnpj
+          cnpj: asset.cnpj || currentBroker.cnpj,
+          guide: `Declare na ficha 'Rendimentos Sujeitos à Tributação Exclusiva/Definitiva', sob o código 10. Informe o CNPJ da fonte pagadora e o valor total recebido no ano.`
         });
       }
     });
 
+    // Merge with manual items
     const manualItems = currentBroker ? (currentBroker.irpfItems || []) : [];
-    return [...items, ...manualItems];
-  }, [currentBroker, assetStats]);
+    const filteredManualItems = manualItems.filter(item => {
+      // Se o item não tem ano, assume que é do ano atual para não sumir
+      if (!item.year) return true;
+      return item.year === calendarYear.toString();
+    });
+    
+    return [...items, ...filteredManualItems];
+  }, [currentBroker, assetStats, irpfYear]);
 
   const filteredDividends = useMemo(() => {
     if (!currentBroker) return [];
-    return (currentBroker.dividends || []).filter(d => {
-      const asset = (currentBroker.assets || []).find(a => a.id === d.asset_id);
-      const matchAsset = dividendFilterAsset === 'all' || d.asset_id === dividendFilterAsset;
+    return uniqueDividends.filter(d => {
+      const asset = (currentBroker.assets || []).find(a => a.id === d.assetId);
+      const matchAsset = dividendFilterAsset === 'all' || d.assetId === dividendFilterAsset;
       const matchType = dividendFilterType === 'all' || asset?.type === dividendFilterType;
-      const date = parseISO(d.date);
+      
+      const date = d.date ? parseISO(d.date) : null;
+      if (!date || !isValid(date)) return false;
+      
       const matchYear = dividendFilterYear === 'all' || format(date, 'yyyy') === dividendFilterYear;
       const matchMonth = dividendFilterMonth === 'all' || format(date, 'MM') === dividendFilterMonth;
+      
       return matchAsset && matchType && matchYear && matchMonth;
     }).sort((a, b) => b.date.localeCompare(a.date));
-  }, [currentBroker, dividendFilterAsset, dividendFilterType, dividendFilterYear, dividendFilterMonth]);
+  }, [currentBroker, uniqueDividends, dividendFilterAsset, dividendFilterType, dividendFilterYear, dividendFilterMonth]);
+
+  const filteredDividendsTotals = useMemo(() => {
+    return filteredDividends.reduce((acc, curr) => ({
+      dividend: acc.dividend + (curr.dividendValue || 0),
+      jcp: acc.jcp + (curr.jcpValue || 0),
+      total: acc.total + (curr.dividendValue || 0) + (curr.jcpValue || 0)
+    }), { dividend: 0, jcp: 0, total: 0 });
+  }, [filteredDividends]);
 
   const monthlyTaxData = useMemo(() => {
     if (!currentBroker) return [];
-    const monthlyGains: Record<string, any> = {};
+    
+    const monthlyGains: Record<string, { 
+      month: string; 
+      stockSales: number; 
+      stockProfit: number; 
+      fiiProfit: number; 
+      bdrProfit: number;
+      otherProfit: number;
+    }> = {};
+
     const assetAvgPrices: Record<string, { quantity: number; totalInvested: number; avgPrice: number }> = {};
-    const allTransactions = [...(currentBroker.transactions || [])]
+    const assetIdToCode = new Map<string, string>();
+    (currentBroker.assets || []).forEach(a => assetIdToCode.set(a.id, a.code.trim().toUpperCase()));
+
+    // Sort all transactions chronologically
+    const allTransactions = [...uniqueTransactions]
       .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
 
     allTransactions.forEach(t => {
-      const asset = (currentBroker.assets || []).find(a => a.id === t.asset_id);
+      const asset = (currentBroker.assets || []).find(a => a.id === t.assetId);
       if (!asset) return;
 
-      const monthKey = t.date.substring(0, 7);
+      const code = asset.code.trim().toUpperCase();
+      const monthKey = t.date.substring(0, 7); // YYYY-MM
       if (!monthlyGains[monthKey]) {
-        monthlyGains[monthKey] = { month: monthKey, stockSales: 0, stockProfit: 0, fiiProfit: 0, bdrProfit: 0, otherProfit: 0 };
+        monthlyGains[monthKey] = { 
+          month: monthKey, 
+          stockSales: 0, 
+          stockProfit: 0, 
+          fiiProfit: 0, 
+          bdrProfit: 0, 
+          otherProfit: 0 
+        };
       }
 
-      if (!assetAvgPrices[t.asset_id]) {
-        assetAvgPrices[t.asset_id] = { quantity: 0, totalInvested: 0, avgPrice: 0 };
+      if (!assetAvgPrices[code]) {
+        assetAvgPrices[code] = { quantity: 0, totalInvested: 0, avgPrice: 0 };
       }
-      const stats = assetAvgPrices[t.asset_id];
+
+      const stats = assetAvgPrices[code];
 
       if (t.type === 'Compra') {
         stats.quantity += t.quantity;
@@ -679,18 +1028,80 @@ export default function App() {
     }).sort((a, b) => b.month.localeCompare(a.month));
   }, [currentBroker]);
 
+  const hasDuplicates = useMemo(() => {
+    if (!currentBroker) return false;
+    const codes = (currentBroker.assets || []).map(a => a.code.trim().toUpperCase());
+    return new Set(codes).size !== codes.length;
+  }, [currentBroker]);
+
   const totalPortfolioValue = useMemo(() => {
-    return Object.values(assetStats).reduce((acc: number, curr: any) => {
+    if (!currentBroker) return 0;
+    // Group by code to avoid double counting duplicate assets
+    const uniqueStatsByCode = new Map<string, any>();
+    (currentBroker.assets || []).forEach(a => {
+      const code = a.code.trim().toUpperCase();
+      if (!uniqueStatsByCode.has(code) && assetStats[a.id]) {
+        uniqueStatsByCode.set(code, assetStats[a.id]);
+      }
+    });
+    
+    return Array.from(uniqueStatsByCode.values()).reduce((acc: number, curr: any) => {
+      // Use current market value if currentPrice is set, otherwise use cost basis
+      const value = curr.currentPrice > 0 ? curr.currentValue : curr.totalInvested;
+      return acc + (value || 0);
+    }, 0);
+  }, [assetStats, currentBroker]);
+
+  const totalProfit = useMemo(() => {
+    if (!currentBroker) return 0;
+    const uniqueStatsByCode = new Map<string, any>();
+    (currentBroker.assets || []).forEach(a => {
+      const code = a.code.trim().toUpperCase();
+      if (!uniqueStatsByCode.has(code) && assetStats[a.id]) {
+        uniqueStatsByCode.set(code, assetStats[a.id]);
+      }
+    });
+    
+    return Array.from(uniqueStatsByCode.values()).reduce((acc: number, curr: any) => {
+      return acc + (curr.currentPrice > 0 ? curr.profit : 0);
+    }, 0);
+  }, [assetStats, currentBroker]);
+
+  const totalCostBasis = useMemo(() => {
+    if (!currentBroker) return 0;
+    const uniqueStatsByCode = new Map<string, any>();
+    (currentBroker.assets || []).forEach(a => {
+      const code = a.code.trim().toUpperCase();
+      if (!uniqueStatsByCode.has(code) && assetStats[a.id]) {
+        uniqueStatsByCode.set(code, assetStats[a.id]);
+      }
+    });
+    
+    return Array.from(uniqueStatsByCode.values()).reduce((acc: number, curr: any) => {
       return acc + (curr.totalInvested || 0);
     }, 0);
-  }, [assetStats]);
+  }, [assetStats, currentBroker]);
 
   const filteredAssets = useMemo(() => {
     if (!currentBroker) return [];
-    const filtered = (currentBroker.assets || []).filter(a => 
-      a.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-      a.code.toLowerCase().includes(searchTerm.toLowerCase())
-    );
+    
+    // Group assets by code to avoid duplicates in the list
+    const uniqueAssetsMap = new Map<string, Asset>();
+    (currentBroker.assets || []).forEach(a => {
+      const code = a.code.trim().toUpperCase();
+      if (!uniqueAssetsMap.has(code)) {
+        uniqueAssetsMap.set(code, a);
+      }
+    });
+    
+    const uniqueAssets = Array.from(uniqueAssetsMap.values());
+
+    const filtered = uniqueAssets.filter(a => {
+      const matchesSearch = a.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                           a.code.toLowerCase().includes(searchTerm.toLowerCase());
+      const matchesType = assetFilterType === 'all' || a.type === assetFilterType;
+      return matchesSearch && matchesType;
+    });
 
     return filtered.sort((a, b) => {
       let valA: any;
@@ -706,7 +1117,10 @@ export default function App() {
         switch (sortField) {
           case 'quantity': valA = statsA?.quantity || 0; valB = statsB?.quantity || 0; break;
           case 'avgPrice': valA = statsA?.avgPrice || 0; valB = statsB?.avgPrice || 0; break;
+          case 'currentPrice': valA = statsA?.currentPrice || 0; valB = statsB?.currentPrice || 0; break;
           case 'totalInvested': valA = statsA?.totalInvested || 0; valB = statsB?.totalInvested || 0; break;
+          case 'currentValue': valA = statsA?.currentValue || 0; valB = statsB?.currentValue || 0; break;
+          case 'profit': valA = statsA?.profit || 0; valB = statsB?.profit || 0; break;
           case 'boughtQuantity': valA = statsA?.boughtQuantity || 0; valB = statsB?.boughtQuantity || 0; break;
           case 'soldQuantity': valA = statsA?.soldQuantity || 0; valB = statsB?.soldQuantity || 0; break;
           default: valA = 0; valB = 0;
@@ -721,7 +1135,7 @@ export default function App() {
       
       return sortDirection === 'asc' ? valA - valB : valB - valA;
     });
-  }, [currentBroker, searchTerm, sortField, sortDirection, assetStats]);
+  }, [currentBroker, searchTerm, assetFilterType, sortField, sortDirection, assetStats]);
 
   const filterOptions = useMemo(() => {
     if (!currentBroker) return { years: [], months: [], days: [] };
@@ -765,26 +1179,24 @@ export default function App() {
     };
   }, [currentBroker]);
 
-  // Sync removal (handled by Supabase now)
-  // useEffect(() => {
-  //   localStorage.setItem('lino_invest_data', JSON.stringify(data));
-  // }, [data]);
-
-  const handleLogout = async () => {
-    if (!supabase) return;
-    await supabase.auth.signOut();
-  };
-
   const showNotify = (message: string, type: 'success' | 'error' = 'success') => {
     setNotification({ message, type });
     setTimeout(() => setNotification(null), 3000);
   };
 
-  const askConfirm = (title: string, message: string, onConfirm: () => void) => {
+  const askConfirm = (
+    title: string, 
+    message: string, 
+    onConfirm: () => void, 
+    confirmText: string = 'Confirmar', 
+    variant: 'danger' | 'primary' | 'success' = 'danger'
+  ) => {
     setConfirmModal({
       isOpen: true,
       title,
       message,
+      confirmText,
+      variant,
       onConfirm: () => {
         onConfirm();
         setConfirmModal(prev => ({ ...prev, isOpen: false }));
@@ -793,9 +1205,8 @@ export default function App() {
   };
 
   const totalDividends = useMemo(() => {
-    if (!currentBroker) return 0;
-    return currentBroker.dividends.reduce((acc, curr) => acc + curr.dividend_value + curr.jcp_value, 0);
-  }, [currentBroker]);
+    return uniqueDividends.reduce((acc, curr) => acc + (curr.dividendValue || 0) + (curr.jcpValue || 0), 0);
+  }, [uniqueDividends]);
 
   // --- Handlers ---
 
@@ -805,6 +1216,54 @@ export default function App() {
     } else {
       setSortField(field);
       setSortDirection('asc');
+    }
+  };
+
+  const handleUnlock = async (password: string) => {
+    if (!data.isEncrypted || !data.payload) return;
+    
+    try {
+      const decrypted = await decryptData(data.payload, password);
+      const parsed = JSON.parse(decrypted);
+      
+      setMasterPassword(password);
+      setData(prev => ({
+        ...prev,
+        brokers: parsed.brokers || [],
+        snapshots: parsed.snapshots || [],
+        currentBrokerId: parsed.currentBrokerId || prev.currentBrokerId
+      }));
+      setIsLocked(false);
+      showNotify('Dados desbloqueados com sucesso!');
+    } catch (e) {
+      showNotify('Senha incorreta!', 'error');
+    }
+  };
+
+  const handleSetPassword = async (password: string) => {
+    if (!password) {
+      // Disable encryption
+      askConfirm(
+        'Desativar Criptografia',
+        'Deseja realmente desativar a criptografia? Seus dados serão salvos em texto simples no navegador.',
+        () => {
+          setData(prev => ({ ...prev, isEncrypted: false, passwordHash: undefined }));
+          setMasterPassword('');
+          setIsSettingPassword(false);
+          showNotify('Criptografia desativada.');
+        }
+      );
+      return;
+    }
+
+    try {
+      const hash = await hashPassword(password);
+      setMasterPassword(password);
+      setData(prev => ({ ...prev, isEncrypted: true, passwordHash: hash }));
+      setIsSettingPassword(false);
+      showNotify('Criptografia ativada com sucesso!');
+    } catch (e) {
+      showNotify('Erro ao configurar senha.', 'error');
     }
   };
 
@@ -834,128 +1293,501 @@ export default function App() {
     showNotify('Relatório exportado com sucesso!');
   };
 
-  const handleCreateBroker = async (e: React.FormEvent<HTMLFormElement>) => {
+  const handleFullBackup = async () => {
+    let backupData: any = { ...data };
+    
+    if (data.isEncrypted && masterPassword) {
+      try {
+        const sensitiveData = JSON.stringify({
+          brokers: data.brokers,
+          snapshots: data.snapshots,
+          currentBrokerId: data.currentBrokerId
+        });
+        const encryptedPayload = await encryptData(sensitiveData, masterPassword);
+        backupData = {
+          isEncrypted: true,
+          passwordHash: data.passwordHash,
+          lastBackupPrompt: data.lastBackupPrompt,
+          payload: encryptedPayload,
+          backupVersion: APP_VERSION,
+          exportedAt: new Date().toISOString()
+        };
+      } catch (e) {
+        showNotify('Erro ao criptografar backup.', 'error');
+        return;
+      }
+    } else {
+      backupData = {
+        ...data,
+        backupVersion: APP_VERSION,
+        exportedAt: new Date().toISOString()
+      };
+    }
+
+    const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `backup-total-investimentos-${format(new Date(), 'yyyy-MM-dd')}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showNotify('Backup completo exportado com sucesso!');
+  };
+
+  const handleImportBackup = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const importedData = JSON.parse(event.target?.result as string);
+        
+        if (!importedData.brokers || !Array.isArray(importedData.brokers)) {
+          throw new Error('Formato de arquivo inválido. Certifique-se de que é um backup do Gerenciador de IR.');
+        }
+
+        askConfirm(
+          'Importar Backup',
+          'Isso irá substituir TODOS os seus dados atuais (corretoras, ativos, transações e versões) pelos dados do arquivo. Deseja continuar?',
+          () => {
+            if (importedData.isEncrypted) {
+              setMasterPassword('');
+              setIsLocked(true);
+            }
+            setData({
+              ...importedData,
+              currentBrokerId: importedData.currentBrokerId || (importedData.brokers?.[0]?.id || null)
+            });
+            showNotify('Backup carregado com sucesso! ' + (importedData.isEncrypted ? 'Insira a senha para desbloquear.' : ''));
+            setIsSnapshotModalOpen(false);
+          },
+          'Confirmar Importação',
+          'primary'
+        );
+      } catch (err) {
+        showNotify('Erro ao importar backup: ' + (err as Error).message, 'error');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  const handleCreateSnapshot = (label?: string) => {
+    const newSnapshot: DataSnapshot = {
+      id: crypto.randomUUID(),
+      version: APP_VERSION,
+      date: new Date().toISOString(),
+      data: JSON.parse(JSON.stringify(data.brokers)),
+      label: label || `Snapshot v${APP_VERSION}`
+    };
+
+    setData(prev => ({
+      ...prev,
+      snapshots: [newSnapshot, ...(prev.snapshots || [])]
+    }));
+    showNotify('Ponto de restauração criado!');
+  };
+
+  const handleRestoreSnapshot = (snapshot: DataSnapshot) => {
+    askConfirm(
+      'Restaurar Versão de Dados',
+      `Deseja realmente restaurar os dados da versão ${snapshot.version} criada em ${snapshot.date && isValid(parseISO(snapshot.date)) ? format(parseISO(snapshot.date), 'dd/MM/yyyy HH:mm') : 'data desconhecida'}? Os dados atuais serão substituídos.`,
+      () => {
+        setData(prev => ({
+          ...prev,
+          brokers: JSON.parse(JSON.stringify(snapshot.data)),
+          currentBrokerId: snapshot.data[0]?.id || null
+        }));
+        showNotify('Dados restaurados com sucesso!');
+        setIsSnapshotModalOpen(false);
+      }
+    );
+  };
+
+  const handleDeleteSnapshot = (id: string) => {
+    setData(prev => ({
+      ...prev,
+      snapshots: (prev.snapshots || []).filter(s => s.id !== id)
+    }));
+    showNotify('Snapshot removido');
+  };
+  const handleCreateBroker = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!user) return;
     const formData = new FormData(e.currentTarget);
     const name = formData.get('name') as string;
     const cnpj = formData.get('cnpj') as string;
     if (!name) return;
 
-    setSyncLoading(true);
-    try {
-      const { data: newBroker, error } = await supabase
-        .from('brokers')
-        .insert([{ name, cnpj, user_id: user.id }])
-        .select()
-        .single();
+    const newBroker: Broker = {
+      id: crypto.randomUUID(),
+      name,
+      cnpj,
+      assets: [],
+      transactions: [],
+      dividends: []
+    };
 
-      if (error) throw error;
-
-      const brokerWithDetails: Broker = {
-        ...newBroker,
-        assets: [],
-        transactions: [],
-        dividends: [],
-        irpfItems: []
-      };
-
-      setData(prev => ({
-        ...prev,
-        brokers: [...prev.brokers, brokerWithDetails],
-        currentBrokerId: newBroker.id
-      }));
-      setIsBrokerModalOpen(false);
-      showNotify('Corretora criada com sucesso!');
-    } catch (err) {
-      console.error(err);
-      showNotify('Erro ao criar corretora', 'error');
-    } finally {
-      setSyncLoading(false);
-    }
+    setData(prev => ({
+      ...prev,
+      brokers: [...prev.brokers, newBroker],
+      currentBrokerId: newBroker.id
+    }));
+    setIsBrokerModalOpen(false);
+    showNotify('Corretora criada com sucesso!');
   };
 
-  const handleSaveAsset = async (e: React.FormEvent<HTMLFormElement>) => {
+  const handleSaveAsset = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!currentBroker || !user) return;
+    if (!currentBroker) return;
     const formData = new FormData(e.currentTarget);
     const type = formData.get('type') as AssetType;
     const name = formData.get('name') as string;
     const code = formData.get('code') as string;
     const cnpj = formData.get('cnpj') as string;
+    const corporateName = formData.get('corporateName') as string;
+    const currentPriceStr = formData.get('currentPrice') as string;
+    const currentPrice = currentPriceStr ? parseFloat(currentPriceStr) : undefined;
 
-    setSyncLoading(true);
-    try {
-      if (editingAsset) {
-        const { error } = await supabase
-          .from('assets')
-          .update({ type, name, code, cnpj })
-          .eq('id', editingAsset.id);
-        
-        if (error) throw error;
-
-        setData(prev => ({
-          ...prev,
-          brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
-            ...b,
-            assets: (b.assets || []).map(a => a.id === editingAsset.id ? { ...a, type, name, code, cnpj } : a)
-          } : b)
-        }));
-        showNotify('Ativo atualizado!');
-      } else {
-        const { data: newAsset, error } = await supabase
-          .from('assets')
-          .insert([{ type, name, code, cnpj, broker_id: currentBroker.id, user_id: user.id }])
-          .select()
-          .single();
-
-        if (error) throw error;
-
-        setData(prev => ({
-          ...prev,
-          brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
-            ...b,
-            assets: [...(b.assets || []), newAsset]
-          } : b)
-        }));
-        showNotify('Ativo adicionado!');
-      }
-      setIsAssetModalOpen(false);
-      setEditingAsset(null);
-    } catch (err) {
-      console.error(err);
-      showNotify('Erro ao salvar ativo', 'error');
-    } finally {
-      setSyncLoading(false);
-    }
-  };
-
-  const handleDeleteAsset = async (id: string) => {
-    if (!currentBroker) return;
-    if ((currentBroker.transactions || []).some(t => t.asset_id === id)) {
-      showNotify('Não é possível excluir ativo com transações!', 'error');
-      return;
-    }
-
-    setSyncLoading(true);
-    try {
-      const { error } = await supabase.from('assets').delete().eq('id', id);
-      if (error) throw error;
-
+    if (editingAsset) {
       setData(prev => ({
         ...prev,
         brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
           ...b,
-          assets: (b.assets || []).filter(a => a.id !== id)
+          assets: (b.assets || []).map(a => a.id === editingAsset.id ? { 
+            ...a, 
+            type, 
+            name, 
+            code, 
+            cnpj, 
+            corporateName,
+            currentPrice,
+            lastPriceUpdate: currentPrice !== a.currentPrice ? new Date().toISOString() : a.lastPriceUpdate
+          } : a)
         } : b)
       }));
-      showNotify('Ativo removido');
-    } catch (err) {
-      console.error(err);
-      showNotify('Erro ao remover ativo', 'error');
-    } finally {
-      setSyncLoading(false);
+      showNotify('Ativo atualizado!');
+    } else {
+      // Check for duplicate code
+      const existingAsset = (currentBroker.assets || []).find(a => a.code.trim().toUpperCase() === code.trim().toUpperCase());
+      if (existingAsset) {
+        showNotify(`Ativo com código ${code.toUpperCase()} já existe!`, 'error');
+        return;
+      }
+
+      const newAsset: Asset = { 
+        id: crypto.randomUUID(), 
+        type, 
+        name, 
+        code, 
+        cnpj, 
+        corporateName,
+        currentPrice,
+        lastPriceUpdate: currentPrice !== undefined ? new Date().toISOString() : undefined
+      };
+      setData(prev => ({
+        ...prev,
+        brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
+          ...b,
+          assets: [...(b.assets || []), newAsset]
+        } : b)
+      }));
+      showNotify('Ativo adicionado!');
     }
+    setIsAssetModalOpen(false);
+    setEditingAsset(null);
+  };
+
+  const handleUpdatePrices = async () => {
+    if (!currentBroker || currentBroker.assets.length === 0) return;
+    
+    const apiKey = userApiKey || localStorage.getItem('USER_GEMINI_API_KEY');
+    if (!apiKey) {
+      showNotify('Por favor, configure sua Chave API Gemini nas Configurações para atualizar preços automaticamente.', 'error');
+      setIsSettingsModalOpen(true);
+      return;
+    }
+
+    setIsUpdatingPrices(true);
+    showNotify('Buscando preços atuais via IA...');
+
+    try {
+      const ai = new GoogleGenAI({ apiKey });
+      const tickers = currentBroker.assets.map(a => a.code.trim().toUpperCase()).join(', ');
+      
+      const prompt = `Você é um analista financeiro. Busque o preço de fechamento atual (ou o mais recente do último mês) para os seguintes ativos da B3 (Brasil): ${tickers}.
+      Retorne APENAS um JSON no formato: [{"code": "TICKER", "price": 0.00}, ...].
+      Certifique-se de que os preços são em Reais (BRL). Se não encontrar um preço exato, use o valor de mercado mais recente disponível.`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                code: { type: Type.STRING },
+                price: { type: Type.NUMBER }
+              },
+              required: ["code", "price"]
+            }
+          }
+        }
+      });
+
+      const result = JSON.parse(response.text);
+      if (Array.isArray(result)) {
+        setData(prev => ({
+          ...prev,
+          brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
+            ...b,
+            assets: (b.assets || []).map(a => {
+              const found = result.find(r => r.code.trim().toUpperCase() === a.code.trim().toUpperCase());
+              if (found) {
+                return { 
+                  ...a, 
+                  currentPrice: found.price, 
+                  lastPriceUpdate: new Date().toISOString() 
+                };
+              }
+              return a;
+            })
+          } : b)
+        }));
+        showNotify('Preços atualizados com sucesso!');
+      }
+    } catch (e) {
+      console.error('Erro ao atualizar preços:', e);
+      showNotify('Erro ao buscar preços. Verifique sua chave API ou tente novamente.', 'error');
+    } finally {
+      setIsUpdatingPrices(false);
+    }
+  };
+
+  const handleAutoFillCnpjs = async () => {
+    if (!currentBroker || !userApiKey) {
+      showNotify('Configure sua chave API Gemini nas configurações primeiro!', 'error');
+      return;
+    }
+
+    setIsAutoFillingCnpjs(true);
+    setProcessingProgress(0);
+    setProcessingStatus('Iniciando busca automática de CNPJs...');
+    let count = 0;
+    
+    try {
+      const updatedAssets = [...currentBroker.assets];
+      const assetsToUpdate = updatedAssets.filter(a => !a.cnpj || !a.corporateName);
+      
+      for (let i = 0; i < assetsToUpdate.length; i++) {
+        const asset = assetsToUpdate[i];
+        const progress = (i / assetsToUpdate.length) * 100;
+        setProcessingProgress(progress);
+        setProcessingStatus(`Buscando informações para ${asset.code} (${i + 1}/${assetsToUpdate.length})...`);
+
+        const info = await fetchB3CompanyInfo(asset.code, userApiKey);
+        if (info) {
+          const index = updatedAssets.findIndex(a => a.id === asset.id);
+          if (index !== -1) {
+            updatedAssets[index] = {
+              ...asset,
+              cnpj: asset.cnpj || info.cnpj,
+              corporateName: asset.corporateName || info.corporateName
+            };
+            count++;
+          }
+        }
+      }
+
+      setProcessingProgress(100);
+      if (count > 0) {
+        setData(prev => ({
+          ...prev,
+          brokers: prev.brokers.map(b => b.id === currentBroker.id ? { ...b, assets: updatedAssets } : b)
+        }));
+        showNotify(`${count} ativos atualizados com sucesso!`);
+      } else {
+        showNotify('Nenhuma informação nova encontrada ou todos já preenchidos.');
+      }
+    } catch (error) {
+      showNotify('Erro ao buscar informações da B3.', 'error');
+    } finally {
+      setIsAutoFillingCnpjs(false);
+      setProcessingProgress(0);
+      setProcessingStatus('');
+    }
+  };
+
+  const handleConsolidateData = () => {
+    if (!currentBroker) return;
+
+    askConfirm(
+      'Consolidar Dados',
+      'Isso irá mesclar ativos com o mesmo código e remover transações/dividendos duplicados. Deseja continuar?',
+      () => {
+        setData(prev => {
+          const broker = prev.brokers.find(b => b.id === prev.currentBrokerId);
+          if (!broker) return prev;
+
+          const assetsByCode = new Map<string, Asset[]>();
+          (broker.assets || []).forEach(a => {
+            const code = a.code.trim().toUpperCase();
+            if (!assetsByCode.has(code)) assetsByCode.set(code, []);
+            assetsByCode.get(code)!.push(a);
+          });
+
+          const newAssets: Asset[] = [];
+          const assetIdMap = new Map<string, string>(); // oldId -> newId
+
+          assetsByCode.forEach((assets, code) => {
+            const primaryAsset = assets[0];
+            const mergedAsset = { ...primaryAsset };
+            assets.forEach(a => {
+              if (!mergedAsset.cnpj && a.cnpj) mergedAsset.cnpj = a.cnpj;
+              if (!mergedAsset.corporateName && a.corporateName) mergedAsset.corporateName = a.corporateName;
+            });
+            newAssets.push(mergedAsset);
+            assets.forEach(a => assetIdMap.set(a.id, primaryAsset.id));
+          });
+
+          const relinkedTransactions = (broker.transactions || []).map(t => ({
+            ...t,
+            assetId: assetIdMap.get(t.assetId) || t.assetId
+          }));
+
+          const relinkedDividends = (broker.dividends || []).map(d => ({
+            ...d,
+            assetId: assetIdMap.get(d.assetId) || d.assetId
+          }));
+
+          const assetIdToCode = new Map<string, string>();
+          newAssets.forEach(a => assetIdToCode.set(a.id, a.code.trim().toUpperCase()));
+
+          // Deduplicate transactions
+          const uniqueTransactions: Transaction[] = [];
+          const txKeys = new Map<string, Transaction>();
+          relinkedTransactions.forEach(t => {
+            const tCode = assetIdToCode.get(t.assetId) || '';
+            const tDate = t.date.split('T')[0];
+            const qty = Number(t.quantity).toFixed(4);
+            const key = `${tCode}-${tDate}-${qty}-${t.type}`;
+            
+            const existing = txKeys.get(key);
+            if (existing) {
+              const sourcePriority: Record<string, number> = { 'Nota de Corretagem': 1, 'Manual': 2, 'Extrato de Custódia': 3, 'Informe de Rendimentos': 4 };
+              const existingPrio = sourcePriority[existing.source as string] || 5;
+              const currentPrio = sourcePriority[t.source as string] || 5;
+              if (currentPrio >= existingPrio) return;
+              
+              const idx = uniqueTransactions.indexOf(existing);
+              if (idx !== -1) uniqueTransactions.splice(idx, 1);
+            }
+            
+            txKeys.set(key, t);
+            uniqueTransactions.push(t);
+          });
+
+          // Deduplicate dividends
+          const uniqueDividends: Dividend[] = [];
+          const divKeys = new Map<string, Dividend>();
+          relinkedDividends.forEach(d => {
+            const dCode = assetIdToCode.get(d.assetId) || '';
+            const dDate = d.date.split('T')[0];
+            const val = Number(d.dividendValue).toFixed(2);
+            const jcp = Number(d.jcpValue).toFixed(2);
+            const key = `${dCode}-${dDate}-${val}-${jcp}`;
+            
+            const existing = divKeys.get(key);
+            if (existing) {
+              const sourcePriority: Record<string, number> = { 'Manual': 1, 'Extrato de Custódia': 2, 'Informe de Rendimentos': 3 };
+              const existingPrio = sourcePriority[existing.source as string] || 4;
+              const currentPrio = sourcePriority[d.source as string] || 4;
+              if (currentPrio >= existingPrio) return;
+              
+              const idx = uniqueDividends.indexOf(existing);
+              if (idx !== -1) uniqueDividends.splice(idx, 1);
+            }
+            
+            divKeys.set(key, d);
+            uniqueDividends.push(d);
+          });
+
+          return {
+            ...prev,
+            brokers: prev.brokers.map(b => b.id === broker.id ? {
+              ...b,
+              assets: newAssets,
+              transactions: uniqueTransactions,
+              dividends: uniqueDividends
+            } : b)
+          };
+        });
+        showNotify('Dados consolidados com sucesso!');
+      }
+    );
+  };
+
+  const toggleDeclaredItem = (itemId: string) => {
+    if (!currentBroker) return;
+    setData(prev => {
+      const broker = prev.brokers.find(b => b.id === prev.currentBrokerId);
+      if (!broker) return prev;
+      
+      const declaredIds = broker.declaredItemIds || [];
+      const isDeclared = declaredIds.includes(itemId);
+      
+      const newDeclaredIds = isDeclared 
+        ? declaredIds.filter(id => id !== itemId)
+        : [...declaredIds, itemId];
+        
+      return {
+        ...prev,
+        brokers: prev.brokers.map(b => b.id === prev.currentBrokerId ? { ...b, declaredItemIds: newDeclaredIds } : b)
+      };
+    });
+  };
+
+  const handleDeleteIrpfItem = (id: string) => {
+    if (!currentBroker) return;
+    askConfirm(
+      'Excluir Item IRPF',
+      'Deseja realmente excluir este item do relatório de IRPF?',
+      () => {
+        setData(prev => {
+          const broker = prev.brokers.find(b => b.id === prev.currentBrokerId);
+          if (!broker) return prev;
+          return {
+            ...prev,
+            brokers: prev.brokers.map(b => b.id === prev.currentBrokerId ? {
+              ...b,
+              irpfItems: (b.irpfItems || []).filter(item => item.id !== id)
+            } : b)
+          };
+        });
+        showNotify('Item excluído com sucesso!');
+      }
+    );
+  };
+
+  const handleDeleteAsset = (id: string) => {
+    if (!currentBroker) return;
+    if ((currentBroker.transactions || []).some(t => t.assetId === id)) {
+      showNotify('Não é possível excluir ativo com transações!', 'error');
+      return;
+    }
+    setData(prev => ({
+      ...prev,
+      brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
+        ...b,
+        assets: (b.assets || []).filter(a => a.id !== id)
+      } : b)
+    }));
+    showNotify('Ativo removido');
   };
 
   const handleDeleteTransaction = (id: string) => {
@@ -963,26 +1795,15 @@ export default function App() {
     askConfirm(
       'Excluir Transação',
       'Tem certeza que deseja remover esta transação?',
-      async () => {
-        setSyncLoading(true);
-        try {
-          const { error } = await supabase.from('transactions').delete().eq('id', id);
-          if (error) throw error;
-
-          setData(prev => ({
-            ...prev,
-            brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
-              ...b,
-              transactions: (b.transactions || []).filter(t => t.id !== id)
-            } : b)
-          }));
-          showNotify('Transação removida');
-        } catch (err) {
-          console.error(err);
-          showNotify('Erro ao remover transação', 'error');
-        } finally {
-          setSyncLoading(false);
-        }
+      () => {
+        setData(prev => ({
+          ...prev,
+          brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
+            ...b,
+            transactions: (b.transactions || []).filter(t => t.id !== id)
+          } : b)
+        }));
+        showNotify('Transação removida');
       }
     );
   };
@@ -992,381 +1813,730 @@ export default function App() {
     askConfirm(
       'Excluir Rendimento',
       'Tem certeza que deseja remover este rendimento?',
-      async () => {
-        setSyncLoading(true);
-        try {
-          const { error } = await supabase.from('dividends').delete().eq('id', id);
-          if (error) throw error;
-
-          setData(prev => ({
-            ...prev,
-            brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
-              ...b,
-              dividends: (b.dividends || []).filter(d => d.id !== id)
-            } : b)
-          }));
-          showNotify('Rendimento removido');
-        } catch (err) {
-          console.error(err);
-          showNotify('Erro ao remover rendimento', 'error');
-        } finally {
-          setSyncLoading(false);
-        }
+      () => {
+        setData(prev => ({
+          ...prev,
+          brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
+            ...b,
+            dividends: (b.dividends || []).filter(d => d.id !== id)
+          } : b)
+        }));
+        showNotify('Rendimento removido');
       }
     );
   };
 
-  const handleSaveTransaction = async (e: React.FormEvent<HTMLFormElement>) => {
+  const handleSaveTransaction = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!currentBroker || !user) return;
+    if (!currentBroker) return;
     const formData = new FormData(e.currentTarget);
-    const asset_id = formData.get('asset_id') as string;
+    const assetId = formData.get('assetId') as string;
     const date = formData.get('date') as string;
     const type = formData.get('type') as 'Compra' | 'Venda';
     const quantity = parseFloat(formData.get('quantity') as string);
     const price = parseFloat(formData.get('price') as string);
+    const source = (formData.get('source') as any) || 'Manual';
 
-    setSyncLoading(true);
-    try {
-      const { data: newTransaction, error } = await supabase
-        .from('transactions')
-        .insert([{ asset_id, date, quantity, price, type, broker_id: currentBroker.id, user_id: user.id }])
-        .select()
-        .single();
-
-      if (error) throw error;
-
-      // Update state
-      setData(prev => ({
-        ...prev,
-        brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
-          ...b,
-          transactions: [...(b.transactions || []), newTransaction]
-        } : b)
-      }));
-      setIsTransactionModalOpen(false);
-      showNotify('Transação registrada!');
-    } catch (err) {
-      console.error(err);
-      showNotify('Erro ao salvar transação', 'error');
-    } finally {
-      setSyncLoading(false);
-    }
+    const newTransaction: Transaction = { id: crypto.randomUUID(), assetId, date, quantity, price, type, source };
+    setData(prev => ({
+      ...prev,
+      brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
+        ...b,
+        transactions: [...(b.transactions || []), newTransaction]
+      } : b)
+    }));
+    setIsTransactionModalOpen(false);
+    showNotify('Transação registrada!');
   };
 
-  const handleSaveDividend = async (e: React.FormEvent<HTMLFormElement>) => {
+  const handleSaveDividend = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!currentBroker || !user) return;
+    if (!currentBroker) return;
     const formData = new FormData(e.currentTarget);
-    const asset_id = formData.get('asset_id') as string;
+    const assetId = formData.get('assetId') as string;
     const date = formData.get('date') as string;
-    const dividend_value = parseFloat(formData.get('dividend_value') as string || '0');
-    const jcp_value = parseFloat(formData.get('jcp_value') as string || '0');
+    const dividendValue = parseFloat(formData.get('dividendValue') as string || '0');
+    const jcpValue = parseFloat(formData.get('jcpValue') as string || '0');
+    const source = (formData.get('source') as any) || 'Manual';
 
-    setSyncLoading(true);
-    try {
-      const { data: newDividend, error } = await supabase
-        .from('dividends')
-        .insert([{ asset_id, date, dividend_value, jcp_value, broker_id: currentBroker.id, user_id: user.id }])
-        .select()
-        .single();
+    const newDividend: Dividend = { id: crypto.randomUUID(), assetId, date, dividendValue, jcpValue, source };
+    setData(prev => ({
+      ...prev,
+      brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
+        ...b,
+        dividends: [...(b.dividends || []), newDividend]
+      } : b)
+    }));
+    setIsDividendModalOpen(false);
+    showNotify('Rendimento registrado!');
+  };
 
-      if (error) throw error;
-
-      setData(prev => ({
-        ...prev,
-        brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
-          ...b,
-          dividends: [...(b.dividends || []), newDividend]
-        } : b)
-      }));
-      setIsDividendModalOpen(false);
-      showNotify('Rendimento registrado!');
-    } catch (err) {
-      console.error(err);
-      showNotify('Erro ao salvar rendimento', 'error');
-    } finally {
-      setSyncLoading(false);
+  const getGeminiErrorMessage = (error: any): string => {
+    const message = error?.message || String(error);
+    console.log('Parsing Gemini error:', message);
+    
+    if (message.includes('RESOURCE_EXHAUSTED') || message.includes('429')) {
+      if (message.includes('spending cap')) {
+        return 'Limite de gastos (Spending Cap) atingido no Google Cloud. Verifique suas configurações de faturamento ou use outra chave de API.';
+      }
+      return 'Limite de uso atingido (Quota Exceeded). Por favor, aguarde alguns minutos ou verifique sua cota no Google AI Studio.';
     }
+    
+    if (message.includes('API_KEY_INVALID') || message.includes('403') || message.includes('Forbidden')) {
+      return 'Chave de API inválida ou sem permissão (Forbidden). Verifique se a chave inserida nas configurações está correta e se o faturamento está ativo no Google Cloud.';
+    }
+
+    if (message.includes('Requested entity was not found') || message.includes('404')) {
+      return 'Modelo não encontrado ou erro de acesso. Verifique se sua chave tem acesso ao modelo gemini-3-flash-preview.';
+    }
+    
+    if (message.includes('fetch failed')) {
+      return 'Erro de conexão. Verifique sua internet ou se o serviço do Google está disponível.';
+    }
+    
+    return message;
   };
 
   const handlePdfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !currentBroker) return;
+    const files = Array.from(e.target.files || []) as File[];
+    if (files.length === 0 || !currentBroker) return;
 
     setIsProcessingPdf(true);
+    setProcessingProgress(0);
+    
+    let totalTransactions = 0;
+    let totalDividends = 0;
+    let successCount = 0;
+
     try {
-      const arrayBuffer = await file.arrayBuffer();
-      const typedArray = new Uint8Array(arrayBuffer);
-      const loadingTask = pdfjsLib.getDocument(typedArray);
-      const pdf = await loadingTask.promise;
-      
-      let fullText = "";
-      for (let i = 1; i <= pdf.numPages; i++) {
-        const page = await pdf.getPage(i);
-        const textContent = await page.getTextContent();
-        
-        let lastY;
-        let pageText = "";
-        for (const item of textContent.items as any[]) {
-          if (lastY !== undefined && Math.abs(item.transform[5] - lastY) > 5) {
-            pageText += "\n";
+      for (let index = 0; index < files.length; index++) {
+        const file = files[index];
+        const fileProgressBase = (index / files.length) * 100;
+        const nextFileProgressBase = ((index + 1) / files.length) * 100;
+
+        setProcessingStatus(`Processando arquivo ${index + 1} de ${files.length}: ${file.name}`);
+        setProcessingProgress(fileProgressBase);
+
+        try {
+          const arrayBuffer = await file.arrayBuffer();
+          const typedArray = new Uint8Array(arrayBuffer);
+          
+          const loadingTask = pdfjsLib.getDocument(typedArray);
+          const pdf = await loadingTask.promise;
+          
+          let fullText = "";
+          for (let i = 1; i <= pdf.numPages; i++) {
+            setProcessingStatus(`Lendo página ${i} de ${pdf.numPages} do arquivo ${file.name}...`);
+            const page = await pdf.getPage(i);
+            const textContent = await page.getTextContent();
+            const pageText = textContent.items.map((item: any) => item.str).join(" ");
+            fullText += pageText + "\n";
+            
+            // Update progress within file reading
+            const pageProgress = fileProgressBase + ((i / pdf.numPages) * (nextFileProgressBase - fileProgressBase) * 0.3);
+            setProcessingProgress(pageProgress);
           }
-          pageText += item.str + " ";
-          lastY = item.transform[5];
+
+          if (!fullText.trim()) {
+            console.warn(`Não foi possível extrair texto do arquivo: ${file.name}`);
+            continue;
+          }
+
+          setProcessingStatus(`IA analisando dados de ${file.name}...`);
+          setProcessingProgress(fileProgressBase + (nextFileProgressBase - fileProgressBase) * 0.5);
+          
+          const extractedData = await extractDataFromPdf(fullText);
+          
+          if (extractedData && (extractedData.transactions?.length > 0 || extractedData.dividends?.length > 0)) {
+            processExtractedData(extractedData);
+            totalTransactions += extractedData.transactions?.length || 0;
+            totalDividends += extractedData.dividends?.length || 0;
+            successCount++;
+          }
+        } catch (fileError) {
+          console.error(`Erro ao processar arquivo ${file.name}:`, fileError);
+          showNotify(`Erro ao processar ${file.name}: ${fileError instanceof Error ? fileError.message : 'Erro desconhecido'}`, 'error');
         }
-        fullText += pageText + "\n--- NOVA PÁGINA ---\n";
+        
+        setProcessingProgress(nextFileProgressBase);
       }
 
-      const extractedData = await extractDataFromPdf(fullText);
-      if (extractedData) {
-        if (extractedData.type === 'informe' && extractedData.irpf_items?.length > 0) {
-          await processExtractedIrpfData(extractedData.irpf_items);
-          showNotify(`${extractedData.irpf_items.length} itens do Informe de Rendimentos carregados!`);
-        } else if (extractedData.transactions?.length > 0 || extractedData.dividends?.length > 0) {
-          await processExtractedData(extractedData);
-          showNotify(`Importação concluída.`);
-        } else {
-           showNotify('Nenhuma informação relevante encontrada.', 'error');
-        }
+      if (successCount > 0) {
+        showNotify(`Importação concluída: ${totalTransactions} transações e ${totalDividends} rendimentos de ${successCount} arquivos.`);
         setIsPdfModalOpen(false);
+      } else if (files.length > 0) {
+        showNotify('Nenhum dado relevante foi extraído dos arquivos selecionados.', 'error');
       }
     } catch (error: any) {
-      showNotify(error.message || 'Erro ao processar o PDF.', 'error');
+      console.error('Erro geral no processamento de PDFs:', error);
+      const userFriendlyMessage = getGeminiErrorMessage(error);
+      showNotify(userFriendlyMessage, 'error');
+      
+      if (userFriendlyMessage.includes('Chave de API') || userFriendlyMessage.includes('Limite')) {
+        setIsSettingsModalOpen(true);
+      }
     } finally {
       setIsProcessingPdf(false);
-      e.target.value = '';
+      setProcessingProgress(0);
+      setProcessingStatus('');
+      if (e.target) e.target.value = '';
     }
   };
 
+  const normalizeTicker = (ticker: string) => {
+    let t = ticker.trim().toUpperCase();
+    // Remove 'F' suffix for fractional shares if it's a standard ticker (e.g., PETR4F -> PETR4)
+    if (t.length > 4 && t.endsWith('F') && !t.startsWith('BOVA') && !t.startsWith('SMAL')) {
+      const base = t.substring(0, t.length - 1);
+      if (/^[A-Z]{4}[0-9]{1,2}$/.test(base)) {
+        return base;
+      }
+    }
+    return t;
+  };
+
+  const inferAssetType = (code: string): AssetType => {
+    const c = code.toUpperCase().trim();
+    if (c.includes('CDB')) return 'CDB';
+    if (c.includes('TESOURO') || c.includes('TD ')) return 'Tesouro Direto';
+    if (c.endsWith('34')) return 'BDR';
+    if (c.endsWith('11')) {
+      if (c.startsWith('BOVA') || c.startsWith('SMAL') || c.startsWith('IVVB') || c.startsWith('HASH') || c.startsWith('QBTC') || c.startsWith('ETHE')) {
+        return 'Ação';
+      }
+      return 'FII';
+    }
+    return 'Ação';
+  };
+
   const extractDataFromPdf = async (text: string) => {
-    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-    if (!apiKey || apiKey.trim() === '' || apiKey === 'your_google_gemini_api_key' || apiKey === 'undefined') {
-      throw new Error('Chave de API do Gemini não configurada.');
+    const apiKey = userApiKey || process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      setIsSettingsModalOpen(true);
+      throw new Error('Chave de API do Gemini não configurada. Por favor, insira sua chave nas configurações.');
     }
 
-    const ai = new GoogleGenAI({ apiKey: apiKey.trim() });
+    const ai = new GoogleGenAI({ apiKey });
     const response = await ai.models.generateContent({
-      model: "gemini-1.5-flash",
-      contents: `Você é um especialista em mercado financeiro brasileiro. Analise o documento financeiro (Nota de Corretagem ou Informe de Rendimentos) e extraia TODOS os dados relevantes.
+      model: "gemini-3-flash-preview",
+      contents: `Você é um CONTADOR especializado em mercado financeiro brasileiro e IRPF. 
+      Sua missão é extrair dados de documentos financeiros para compor o patrimônio e rendimentos do usuário com precisão contábil absoluta.
       
-      Regras de Extração:
-      1. DATA: Use o formato YYYY-MM-DD.
-      2. ATIVO (code): Ticker oficial (ex: PETR4, IVVB11).
-      3. NOME (name): Razão Social ou Nome Completo do Fundo/Empresa. Importante!
-      4. TIPO (type): Escolha entre 'Ação', 'FII', 'BDR', 'CDB', 'Tesouro Direto', 'Crypto'.
-      5. CNPJ: Extraia o CNPJ do ativo ou da fonte pagadora se estiver no texto.
-      6. VALORES: Números decimais puros (use ponto para decimal).
+      TIPOS DE DOCUMENTOS COMUNS:
+      - Nota de Corretagem: Extraia transações de compra/venda do dia. (Fonte: 'Nota de Corretagem')
+      - Informe de Rendimentos: Extraia o SALDO (Situação em 31/12) e os RENDIMENTOS (Dividendos/JCP) do ano. (Fonte: 'Informe de Rendimentos')
+      - Extratos de Custódia: Extraia a posição atual (quantidade e preço médio/custo). (Fonte: 'Extrato de Custódia')
       
-      Identifique se o documento é uma 'nota' (operações de compra/venda) ou 'informe' (saldos e rendimentos anuais).
+      REGRAS CRÍTICAS:
+      1. TRANSAÇÕES: Se o documento for um Informe de Rendimentos e mostrar "Situação em 31/12/XXXX", extraia a QUANTIDADE e o CUSTO TOTAL. Converta isso em uma transação de 'Compra' com data de 31/12 daquele ano, usando o preço unitário (Custo Total / Quantidade). Defina o 'source' como 'Informe de Rendimentos'.
+      2. PREÇOS ATUAIS: Se o documento contiver o valor de mercado atual (ex: cotação de fechamento), extraia como 'assetPrices'.
+      3. TAXAS: Em Notas de Corretagem, some todas as taxas (corretagem, emolumentos, ISS) ao valor da compra ou subtraia do valor da venda para obter o PREÇO LÍQUIDO. Defina o 'source' como 'Nota de Corretagem'.
+      4. RENDIMENTOS: Extraia Dividendos e JCP separadamente. Se o valor for "por cota", multiplique pela quantidade ou use o valor total creditado.
+      5. NÃO EXTRAIA TOTAIS: Ignore linhas que mostram "Total da Nota", "Valor Líquido da Nota", "Resumo Financeiro" ou totais de movimentação como se fossem transações individuais. Extraia apenas as operações de compra e venda de ativos específicos.
+      6. TICKERS: Normalize tickers para o formato padrão (ex: PETR4, MXRF11). Se houver um 'F' no final indicando mercado fracionário (ex: PETR4F), mantenha o ticker base (PETR4).
       
-      Retorne um objeto JSON rigoroso:
-      {
-        "type": "nota" | "informe",
-        "transactions": [{ "code", "name", "type", "date", "quantity", "price", "type_op": "Compra" | "Venda", "cnpj" }],
-        "dividends": [{ "code", "name", "type", "date", "dividend_value", "jcp_value", "cnpj" }],
-        "irpf_items": [{ "topic", "ficha", "group", "code", "description", "cnpj", "value", "previous_value", "asset_code" }]
-      }
+      Retorne um objeto JSON com três arrays: "transactions", "dividends" e "assetPrices".
+      Certifique-se de que os números sejam decimais puros (ex: 1234.56), sem símbolos de moeda ou separadores de milhar.
       
       Texto do documento:
       ${text}`,
       config: {
         responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            transactions: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  date: { type: Type.STRING, description: "Data no formato YYYY-MM-DD" },
+                  code: { type: Type.STRING, description: "Código do ativo (ex: PETR4)" },
+                  type: { type: Type.STRING, description: "Tipo: 'Compra' ou 'Venda'" },
+                  quantity: { type: Type.NUMBER },
+                  price: { type: Type.NUMBER },
+                  source: { type: Type.STRING, enum: ['Nota de Corretagem', 'Informe de Rendimentos', 'Extrato de Custódia'] }
+                },
+                required: ["date", "code", "type", "quantity", "price", "source"]
+              }
+            },
+            dividends: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  date: { type: Type.STRING, description: "Data no formato YYYY-MM-DD" },
+                  code: { type: Type.STRING, description: "Código do ativo (ex: PETR4)" },
+                  dividendValue: { type: Type.NUMBER, description: "Valor de dividendos ou rendimentos isentos" },
+                  jcpValue: { type: Type.NUMBER, description: "Valor de JCP (Juros sobre Capital Próprio)" },
+                  source: { type: Type.STRING, enum: ['Informe de Rendimentos', 'Extrato de Custódia'] }
+                },
+                required: ["date", "code", "source"]
+              }
+            },
+            assetPrices: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  code: { type: Type.STRING, description: "Código do ativo (ex: PETR4)" },
+                  price: { type: Type.NUMBER, description: "Preço unitário atual ou de fechamento citado no documento" }
+                },
+                required: ["code", "price"]
+              }
+            }
+          },
+          required: ["transactions", "dividends", "assetPrices"]
+        }
       }
     });
 
     try {
-      const result = JSON.parse(response.text || '{"transactions": [], "dividends": [], "irpf_items": []}');
+      const result = JSON.parse(response.text || '{"transactions": [], "dividends": [], "assetPrices": []}');
       return result;
     } catch (e) {
       console.error('Erro ao parsear resposta do Gemini:', e, response.text);
-      throw new Error('A IA retornou um formato inválido.');
+      throw new Error('A IA retornou um formato inválido. Tente novamente.');
     }
   };
 
-  const processExtractedData = async (extracted: { transactions: any[], dividends: any[] }) => {
-    if (!currentBroker || !user) return;
+  const processExtractedData = (extracted: { transactions: any[], dividends: any[], assetPrices?: any[] }) => {
+    if (!currentBroker) return;
 
-    setSyncLoading(true);
-    try {
-      const broker = data.brokers.find(b => b.id === data.currentBrokerId)!;
-      const currentAssets = [...broker.assets];
-      
-      // 1. Handle Assets (Ensure all exist in DB)
-      const uniqueAssetCodes = new Set([
-        ...(extracted.transactions || []).map(t => t.code.toUpperCase().trim()),
-        ...(extracted.dividends || []).map(d => d.code.toUpperCase().trim())
-      ]);
+    setData(prev => {
+      const broker = prev.brokers.find(b => b.id === prev.currentBrokerId)!;
+      const newAssets = [...broker.assets];
+      const newTransactions = [...broker.transactions];
+      const newDividends = [...broker.dividends];
 
-      const assetMap: Record<string, string> = {};
-      currentAssets.forEach(a => assetMap[a.code.toUpperCase()] = a.id);
+      const assetIdToCode = new Map<string, string>();
+      newAssets.forEach(a => assetIdToCode.set(a.id, a.code.trim().toUpperCase()));
 
-      for (const item of [...(extracted.transactions || []), ...(extracted.dividends || [])]) {
-        const code = item.code?.toUpperCase().trim();
-        if (!code) continue;
+      // Processar Transações
+      extracted.transactions?.forEach(item => {
+        const code = normalizeTicker(item.code);
+        let asset = newAssets.find(a => normalizeTicker(a.code) === code);
         
-        if (!assetMap[code]) {
-          const name = item.name || code;
-          const type = item.type || 'Ação';
-          const cnpj = item.cnpj || '';
-
-          const { data: newAsset, error } = await supabase
-            .from('assets')
-            .insert([{ code, name, type, cnpj, broker_id: broker.id, user_id: user.id }])
-            .select()
-            .single();
-          
-          if (error) throw error;
-          assetMap[code] = newAsset.id;
-          currentAssets.push(newAsset);
+        if (!asset) {
+          const type = inferAssetType(code);
+          asset = { 
+            id: crypto.randomUUID(), 
+            code: code, 
+            name: code, 
+            type: type,
+            cnpj: '',
+            averagePrice: 0,
+            quantity: 0,
+            totalInvested: 0
+          };
+          newAssets.push(asset);
+          assetIdToCode.set(asset.id, code);
         }
-      }
 
-      // 2. Prepare Transactions
-      const transactionsToInsert = (extracted.transactions || []).map(item => {
-        const isVenda = item.type_op?.toLowerCase().includes('venda') || item.type?.toLowerCase().includes('venda') || item.type_op === 'V' || item.type === 'V';
-        return {
-          asset_id: assetMap[item.code.toUpperCase().trim()],
+        const isVenda = item.type.toLowerCase().includes('venda') || item.type.toUpperCase() === 'V' || item.type.toUpperCase() === 'VENDA';
+        const type: 'Compra' | 'Venda' = isVenda ? 'Venda' : 'Compra';
+        const quantity = Math.abs(item.quantity);
+        const price = item.price;
+        
+        // Normalizar data para comparação
+        const normalizedItemDate = item.date.split('T')[0];
+        
+        // Evitar duplicatas
+        const isDuplicate = newTransactions.some(t => {
+          const tCode = assetIdToCode.get(t.assetId);
+          const tDate = t.date.split('T')[0];
+          
+          if (tCode === code && tDate === normalizedItemDate && t.type === type) {
+            const qtyMatch = Math.abs(t.quantity - quantity) < 0.0001;
+            const priceMatch = Math.abs(t.price - price) < 0.01;
+            
+            if (qtyMatch && priceMatch) return true;
+            
+            if (item.source === 'Informe de Rendimentos' && t.source === 'Nota de Corretagem') {
+              const itemYear = normalizedItemDate.split('-')[0];
+              const tYear = tDate.split('-')[0];
+              if (itemYear === tYear) return true;
+            }
+          }
+          return false;
+        });
+
+        if (isDuplicate) return;
+
+        newTransactions.push({
+          id: crypto.randomUUID(),
+          assetId: asset.id,
           date: item.date,
-          quantity: Math.abs(item.quantity),
-          price: item.price,
-          type: isVenda ? 'Venda' : 'Compra',
-          broker_id: broker.id,
-          user_id: user.id
-        };
+          quantity: quantity,
+          price: price,
+          type: type,
+          source: item.source || 'Nota de Corretagem'
+        });
       });
 
-      // 3. Prepare Dividends
-      const dividendsToInsert = (extracted.dividends || []).map(item => ({
-        asset_id: assetMap[item.code.toUpperCase().trim()],
-        date: item.date,
-        dividend_value: item.dividend_value || 0,
-        jcp_value: item.jcp_value || 0,
-        broker_id: broker.id,
-        user_id: user.id
-      }));
+      // Processar Rendimentos
+      extracted.dividends?.forEach(item => {
+        const code = normalizeTicker(item.code);
+        let asset = newAssets.find(a => normalizeTicker(a.code) === code);
+        
+        if (!asset) {
+          const type = inferAssetType(code);
+          asset = { 
+            id: crypto.randomUUID(), 
+            code: code, 
+            name: code, 
+            type: type,
+            cnpj: '',
+            averagePrice: 0,
+            quantity: 0,
+            totalInvested: 0
+          };
+          newAssets.push(asset);
+          assetIdToCode.set(asset.id, code);
+        }
 
-      // 4. Bulk Insert
-      if (transactionsToInsert.length > 0) {
-        const { error } = await supabase.from('transactions').insert(transactionsToInsert);
-        if (error) throw error;
-      }
-      if (dividendsToInsert.length > 0) {
-        const { error } = await supabase.from('dividends').insert(dividendsToInsert);
-        if (error) throw error;
-      }
+        const divValue = item.dividendValue || 0;
+        const jcpValue = item.jcpValue || 0;
+        const normalizedItemDate = item.date.split('T')[0];
 
-      // 5. Final State Update
-      await fetchData(); // Refresh everything to be safe and consistent
-    } catch (err) {
-      console.error(err);
-      showNotify('Erro ao processar dados importados', 'error');
-    } finally {
-      setSyncLoading(false);
-    }
+        // Evitar duplicatas
+        const isDuplicate = newDividends.some(d => {
+          const dCode = assetIdToCode.get(d.assetId);
+          const dDate = d.date.split('T')[0];
+          return dCode === code && 
+                 dDate === normalizedItemDate && 
+                 Math.abs(d.dividendValue - divValue) < 0.0001 && 
+                 Math.abs(d.jcpValue - jcpValue) < 0.0001;
+        });
+
+        if (isDuplicate) return;
+
+        newDividends.push({
+          id: crypto.randomUUID(),
+          assetId: asset.id,
+          date: item.date,
+          dividendValue: divValue,
+          jcpValue: jcpValue
+        });
+      });
+
+      // Processar Preços de Ativos
+      extracted.assetPrices?.forEach(item => {
+        const code = item.code.toUpperCase().trim();
+        const price = item.price;
+        const assetIdx = newAssets.findIndex(a => a.code.toUpperCase().trim() === code);
+        
+        if (assetIdx !== -1) {
+          newAssets[assetIdx] = { 
+            ...newAssets[assetIdx], 
+            currentPrice: price, 
+            lastPriceUpdate: new Date().toISOString() 
+          };
+        }
+      });
+
+      return {
+        ...prev,
+        brokers: prev.brokers.map(b => b.id === broker.id ? {
+          ...b,
+          assets: newAssets,
+          transactions: newTransactions,
+          dividends: newDividends
+        } : b)
+      };
+    });
+
+    const priceCount = extracted.assetPrices?.length || 0;
+    showNotify(`Processamento concluído: ${extracted.transactions.length} transações, ${extracted.dividends.length} rendimentos e ${priceCount} preços encontrados.`);
+    
+    // Auto-consolidate after import to ensure clean data
+    setTimeout(() => {
+      handleConsolidateData();
+    }, 1000);
   };
 
   const handleIrpfPdfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !currentBroker) return;
+    const files = Array.from(e.target.files || []) as File[];
+    if (files.length === 0 || !currentBroker) return;
 
     setIsProcessingPdf(true);
+    setProcessingProgress(0);
+    
+    let totalItems = 0;
+    let successCount = 0;
+
     try {
-      const arrayBuffer = await file.arrayBuffer();
-      const typedArray = new Uint8Array(arrayBuffer);
-      const loadingTask = pdfjsLib.getDocument(typedArray);
-      const pdf = await loadingTask.promise;
-      
-      let fullText = "";
-      for (let i = 1; i <= pdf.numPages; i++) {
-        const page = await pdf.getPage(i);
-        const textContent = await page.getTextContent();
-        
-        let lastY;
-        let pageText = "";
-        for (const item of textContent.items as any[]) {
-          if (lastY !== undefined && Math.abs(item.transform[5] - lastY) > 5) {
-            pageText += "\n";
+      for (let index = 0; index < files.length; index++) {
+        const file = files[index];
+        const fileProgressBase = (index / files.length) * 100;
+        const nextFileProgressBase = ((index + 1) / files.length) * 100;
+
+        setProcessingStatus(`Processando Informe ${index + 1} de ${files.length}: ${file.name}`);
+        setProcessingProgress(fileProgressBase);
+
+        try {
+          const arrayBuffer = await file.arrayBuffer();
+          const typedArray = new Uint8Array(arrayBuffer);
+          const loadingTask = pdfjsLib.getDocument(typedArray);
+          const pdf = await loadingTask.promise;
+          
+          let fullText = "";
+          for (let i = 1; i <= pdf.numPages; i++) {
+            setProcessingStatus(`Lendo página ${i} de ${pdf.numPages} do Informe ${file.name}...`);
+            const page = await pdf.getPage(i);
+            const textContent = await page.getTextContent();
+            const pageText = textContent.items.map((item: any) => item.str).join(" ");
+            fullText += pageText + "\n";
+            
+            const pageProgress = fileProgressBase + ((i / pdf.numPages) * (nextFileProgressBase - fileProgressBase) * 0.3);
+            setProcessingProgress(pageProgress);
           }
-          pageText += item.str + " ";
-          lastY = item.transform[5];
+
+          if (fullText.trim().length === 0) {
+            console.error(`Não foi possível extrair texto do informe ${file.name}. O PDF pode ser uma imagem ou estar protegido.`);
+            continue;
+          }
+
+          if (fullText.trim().length < 50) {
+            console.warn(`Texto extraído do informe ${file.name} é muito curto (${fullText.length} caracteres).`);
+            // Se o texto for muito curto, pode ser um PDF de imagem ou erro na leitura
+          }
+
+          setProcessingStatus(`IA analisando Informe ${file.name}...`);
+          setProcessingProgress(fileProgressBase + (nextFileProgressBase - fileProgressBase) * 0.5);
+          
+          const irpfData = await extractIrpfDataFromPdf(fullText);
+          
+          if (irpfData && irpfData.length > 0) {
+            processExtractedIrpfData(irpfData);
+            totalItems += irpfData.length;
+            successCount++;
+          } else {
+            console.warn(`IA não encontrou dados de IR no informe ${file.name}. Texto extraído (primeiros 500 chars):`, fullText.substring(0, 500));
+          }
+        } catch (fileError) {
+          console.error(`Erro ao processar informe ${file.name}:`, fileError);
+          showNotify(`Erro ao processar ${file.name}: ${fileError instanceof Error ? fileError.message : 'Erro desconhecido'}`, 'error');
         }
-        fullText += pageText + "\n--- NOVA PÁGINA ---\n";
+        
+        setProcessingProgress(nextFileProgressBase);
       }
 
-      if (!fullText.trim() || fullText.length < 50) {
-        throw new Error('O Informe de Rendimentos parece estar vazio ou é uma imagem não legível.');
-      }
-
-      const irpfData = await extractIrpfDataFromPdf(fullText);
-      if (irpfData && irpfData.length > 0) {
-        processExtractedIrpfData(irpfData);
-        showNotify(`${irpfData.length} itens do Informe de Rendimentos importados!`);
+      if (successCount > 0) {
+        showNotify(`${totalItems} itens importados de ${successCount} Informes de Rendimentos!`);
         setIsIrpfPdfModalOpen(false);
-      } else {
-        showNotify('Nenhum dado de IR encontrado no documento.', 'error');
+      } else if (files.length > 0) {
+        showNotify('Nenhum dado de IR encontrado nos documentos selecionados.', 'error');
       }
     } catch (error: any) {
-      console.error('Erro ao processar Informe:', error);
-      showNotify(error.message || 'Erro ao processar o Informe.', 'error');
+      console.error('Erro ao processar Informes:', error);
+      const userFriendlyMessage = getGeminiErrorMessage(error);
+      showNotify(userFriendlyMessage, 'error');
+      
+      if (userFriendlyMessage.includes('Chave de API') || userFriendlyMessage.includes('Limite')) {
+        setIsSettingsModalOpen(true);
+      }
     } finally {
       setIsProcessingPdf(false);
+      setProcessingProgress(0);
+      setProcessingStatus('');
       e.target.value = '';
     }
   };
 
-  const extractIrpfDataFromPdf = async (text: string) => {
-    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-    if (!apiKey || apiKey.trim() === '' || apiKey === 'your_google_gemini_api_key' || apiKey === 'undefined') {
-      throw new Error('Chave de API do Gemini não configurada no .env ou Vercel. Verifique as variáveis de ambiente.');
+  const handleCnpjPdfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []) as File[];
+    if (files.length === 0 || !currentBroker) return;
+
+    setIsProcessingPdf(true);
+    setProcessingProgress(0);
+    let totalUpdated = 0;
+    let successCount = 0;
+
+    try {
+      for (let index = 0; index < files.length; index++) {
+        const file = files[index];
+        const fileProgressBase = (index / files.length) * 100;
+        const nextFileProgressBase = ((index + 1) / files.length) * 100;
+
+        setProcessingStatus(`Extraindo CNPJs de ${file.name}...`);
+        setProcessingProgress(fileProgressBase);
+
+        try {
+          const arrayBuffer = await file.arrayBuffer();
+          const typedArray = new Uint8Array(arrayBuffer);
+          const loadingTask = pdfjsLib.getDocument(typedArray);
+          const pdf = await loadingTask.promise;
+          
+          let fullText = "";
+          for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const textContent = await page.getTextContent();
+            const pageText = textContent.items.map((item: any) => item.str).join(" ");
+            fullText += pageText + "\n";
+            
+            const pageProgress = fileProgressBase + ((i / pdf.numPages) * (nextFileProgressBase - fileProgressBase) * 0.3);
+            setProcessingProgress(pageProgress);
+          }
+
+          setProcessingStatus(`IA analisando CNPJs em ${file.name}...`);
+          setProcessingProgress(fileProgressBase + (nextFileProgressBase - fileProgressBase) * 0.5);
+
+          const cnpjData = await extractCnpjsFromPdf(fullText);
+          if (cnpjData && cnpjData.length > 0) {
+            let count = 0;
+            setData(prev => {
+              const broker = prev.brokers.find(b => b.id === prev.currentBrokerId)!;
+              const newAssets = broker.assets.map(asset => {
+                const match = cnpjData.find(d => d.code.toUpperCase() === asset.code.toUpperCase());
+                if (match && match.cnpj && match.cnpj !== asset.cnpj) {
+                  count++;
+                  return { ...asset, cnpj: match.cnpj };
+                }
+                return asset;
+              });
+              totalUpdated += count;
+              return {
+                ...prev,
+                brokers: prev.brokers.map(b => b.id === broker.id ? { ...b, assets: newAssets } : b)
+              };
+            });
+            successCount++;
+          }
+        } catch (fileError) {
+          console.error(`Erro ao processar CNPJs de ${file.name}:`, fileError);
+        }
+        
+        setProcessingProgress(nextFileProgressBase);
+      }
+
+      if (successCount > 0) {
+        showNotify(`${totalUpdated} CNPJs atualizados com sucesso de ${successCount} arquivos!`);
+      } else if (files.length > 0) {
+        showNotify('Nenhum CNPJ encontrado nos documentos selecionados.', 'error');
+      }
+    } catch (error: any) {
+      console.error('Erro ao processar CNPJs:', error);
+      const userFriendlyMessage = getGeminiErrorMessage(error);
+      showNotify(userFriendlyMessage, 'error');
+      if (userFriendlyMessage.includes('Chave de API') || userFriendlyMessage.includes('Limite')) {
+        setIsSettingsModalOpen(true);
+      }
+    } finally {
+      setIsProcessingPdf(false);
+      setProcessingProgress(0);
+      setProcessingStatus('');
+      e.target.value = '';
+    }
+  };
+
+  const extractCnpjsFromPdf = async (text: string) => {
+    const apiKey = userApiKey || process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      setIsSettingsModalOpen(true);
+      throw new Error('Chave de API do Gemini não configurada. Por favor, insira sua chave nas configurações.');
     }
 
-    const ai = new GoogleGenAI({ apiKey: apiKey.trim() });
+    const ai = new GoogleGenAI({ apiKey });
     const response = await ai.models.generateContent({
-      model: "gemini-1.5-flash",
-      contents: `Você é um especialista em IRPF (Imposto de Renda Pessoa Física) do Brasil.
-      Analise o Informe de Rendimentos fornecido e extraia TODOS os dados para a declaração anual.
-      O objetivo é capturar tanto RENDIMENTOS DE INVESTIMENTOS quanto RENDIMENTOS PESSOAIS (Salários, Aluguéis, etc.).
-
-      Categorias (topic):
-      1. 'Bens e Direitos': Saldos, Ações, FIIs, Tesouro, Moedas (Posição anterior e atual).
-      2. 'Rendimentos Isentos': Dividendos, Rendimentos FII, Poupança, Lucros.
-      3. 'Rendimentos Sujeitos à Tributação Exclusiva': JCP, Rendimentos de Aplicações (CDB, etc.).
-      4. 'Rendimentos Tributáveis': SALÁRIOS, PROLABORE, ALUGUÉIS, APOSENTADORIA.
-      5. 'Imposto Retido na Fonte': Imposto retido sobre salários ou aplicações.
-      6. 'Rendimentos Recebidos Acumuladamente': Seções específicas de anos anteriores.
-
-      Para cada item:
-      - topic: Uma das categorias acima.
-      - ficha: Nome exato da ficha no programa IRPF.
-      - group/code: Códigos oficiais da Receita Federal.
-      - description: Descrição completa. Inclua: Nome da Fonte Pagadora/Empresa, CNPJ, e detalhes do rendimento.
-      - cnpj: CNPJ da fonte pagadora.
-      - value: Valor do rendimento ou saldo atual.
-      - previous_value: Saldo no ano anterior (para Bens e Direitos).
-      - asset_code: Ticker (se for investimento).
-
-      Retorne um JSON array de objetos (snake_case):
-      (topic, ficha, group, code, description, cnpj, value, previous_value, asset_code).
+      model: "gemini-flash-latest",
+      contents: `Você é um especialista em mercado financeiro brasileiro.
+      Analise o documento fornecido e extraia o CNPJ de cada ativo financeiro mencionado.
+      Geralmente esses dados estão em Informes de Rendimentos ou Extratos de Custódia.
       
-      Texto:
+      Identifique o CÓDIGO DO ATIVO (Ticker, ex: PETR4, MXRF11, IVVB11) e o respectivo CNPJ da empresa ou fundo.
+      Normalize os tickers para o formato padrão (ex: PETR4, MXRF11). Se houver um 'F' no final indicando mercado fracionário (ex: PETR4F), mantenha o ticker base (PETR4).
+      
+      Retorne um JSON array de objetos com as propriedades "code" e "cnpj".
+      
+      Texto do documento:
       ${text}`,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
-          type: "array",
+          type: Type.ARRAY,
           items: {
-            type: "object",
+            type: Type.OBJECT,
             properties: {
-              topic: { type: "string" },
-              ficha: { type: "string" },
-              group: { type: "string" },
-              code: { type: "string" },
-              description: { type: "string" },
-              cnpj: { type: "string" },
-              value: { type: "number" },
-              previous_value: { type: "number" },
-              asset_code: { type: "string" }
+              code: { type: Type.STRING, description: "Código do ativo (ex: PETR4)" },
+              cnpj: { type: Type.STRING, description: "CNPJ formatado (00.000.000/0000-00)" }
+            },
+            required: ["code", "cnpj"]
+          }
+        }
+      }
+    });
+
+    try {
+      return JSON.parse(response.text || '[]');
+    } catch (e) {
+      console.error('Erro ao parsear resposta do Gemini:', e);
+      return [];
+    }
+  };
+
+  const extractIrpfDataFromPdf = async (text: string) => {
+    const apiKey = userApiKey || process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      setIsSettingsModalOpen(true);
+      throw new Error('Chave de API do Gemini não configurada. Por favor, insira sua chave nas configurações.');
+    }
+
+    const ai = new GoogleGenAI({ apiKey });
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: `Você é um especialista em IRPF (Imposto de Renda Pessoa Física) do Brasil e contador especializado em investimentos.
+      Analise o texto extraído de um Informe de Rendimentos e extraia TODOS os dados relevantes para a declaração anual.
+      O objetivo é que o usuário saiba exatamente o que preencher em cada ficha do programa da Receita Federal.
+
+      REGRAS DE EXTRAÇÃO:
+      1. Identifique o Ano-Calendário (ano em que os rendimentos foram recebidos). Ex: "Ano-Calendário: 2024".
+      2. Extraia Saldos (Bens e Direitos), Rendimentos Isentos (Dividendos), Rendimentos Sujeitos à Tributação Exclusiva (JCP, Aplicações) e Imposto Retido.
+      3. Para cada item, identifique o Grupo e Código oficial do IRPF.
+      4. Se o texto estiver confuso, tente inferir pelo contexto dos nomes das seções (ex: "4. Rendimentos Sujeitos à Tributação Exclusiva").
+
+      Categorias (topic):
+      - 'Bens e Direitos'
+      - 'Rendimentos Isentos'
+      - 'Rendimentos Sujeitos à Tributação Exclusiva'
+      - 'Rendimentos Tributáveis'
+      - 'Imposto Retido na Fonte'
+      - 'Rendimentos Recebidos Acumuladamente'
+
+      REGRAS DE TICKER:
+      Normalize os tickers para o formato padrão (ex: PETR4, MXRF11). Se houver um 'F' no final indicando mercado fracionário (ex: PETR4F), mantenha o ticker base (PETR4).
+
+      Retorne um JSON array de objetos com:
+      - topic: Categoria acima.
+      - ficha: Nome da ficha no programa IRPF.
+      - group: Grupo (para Bens e Direitos).
+      - code: Código do item.
+      - description: Discriminação completa (Fonte, CNPJ, Ticker, Qtd, Corretora).
+      - cnpj: CNPJ da fonte pagadora.
+      - value: Valor (saldo atual ou rendimento).
+      - previousValue: Saldo no ano anterior (para Bens e Direitos).
+      - assetCode: Ticker se disponível.
+      - year: Ano-Calendário (ex: "2024").
+
+      Texto do informe:
+      ${text}`,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              topic: { type: Type.STRING },
+              ficha: { type: Type.STRING },
+              group: { type: Type.STRING },
+              code: { type: Type.STRING },
+              description: { type: Type.STRING },
+              cnpj: { type: Type.STRING },
+              value: { type: Type.NUMBER },
+              previousValue: { type: Type.NUMBER },
+              assetCode: { type: Type.STRING },
+              year: { type: Type.STRING }
             },
             required: ["topic", "code", "description", "value"]
           }
@@ -1375,40 +2545,70 @@ export default function App() {
     });
 
     try {
-      const result = JSON.parse(response.text || '[]');
-      return result;
+      let jsonStr = response.text || '[]';
+      // Limpeza extra caso o modelo retorne markdown mesmo com responseMimeType
+      if (jsonStr.includes('```')) {
+        jsonStr = jsonStr.replace(/```json|```/g, '').trim();
+      }
+      
+      const data = JSON.parse(jsonStr);
+      
+      if (!Array.isArray(data)) {
+        console.warn('IA retornou um objeto em vez de um array:', data);
+        return [];
+      }
+
+      // Se o ano estiver faltando em algum item, tenta preencher com o ano atual ou o ano encontrado no texto
+      const yearMatch = text.match(/Ano-Calendário:?\s*(\d{4})/i) || text.match(/Ano\s*base:?\s*(\d{4})/i) || text.match(/Exercício:?\s*(\d{4})/i);
+      const inferredYear = yearMatch ? (yearMatch[0].toLowerCase().includes('exercício') ? (parseInt(yearMatch[1]) - 1).toString() : yearMatch[1]) : (new Date().getFullYear() - 1).toString();
+
+      console.log(`Dados de IR extraídos: ${data.length} itens. Ano inferido: ${inferredYear}`);
+
+      return data.map((item: any) => ({
+        ...item,
+        year: item.year || inferredYear
+      }));
     } catch (e) {
-      console.error('Erro ao parsear resposta do Gemini:', e, response.text);
+      console.error('Erro ao parsear resposta do Gemini:', e);
+      console.log('Resposta bruta da IA:', response.text);
       return [];
     }
   };
 
-  const processExtractedIrpfData = async (items: any[]) => {
-    if (!currentBroker || !user) return;
-    setSyncLoading(true);
-    try {
-      const itemsToInsert = items.map(item => ({
-        ...item,
-        broker_id: currentBroker.id,
-        user_id: user.id
-      }));
+  const processExtractedIrpfData = (items: any[]) => {
+    if (!currentBroker) return;
+    setData(prev => {
+      const broker = prev.brokers.find(b => b.id === prev.currentBrokerId);
+      if (!broker) return prev;
 
-      const { error } = await supabase.from('irpf_items').insert(itemsToInsert);
-      if (error) throw error;
+      const existingItems = broker.irpfItems || [];
+      const newItems = items.filter(item => {
+        // Verificar duplicata exata
+        return !existingItems.some(existing => 
+          existing.topic === item.topic &&
+          existing.code === item.code &&
+          existing.year === item.year &&
+          Math.abs(existing.value - item.value) < 0.01 &&
+          existing.description === item.description
+        );
+      }).map(item => ({ ...item, id: crypto.randomUUID() }));
 
-      await fetchData();
-    } catch (err) {
-      console.error(err);
-      showNotify('Erro ao salvar itens de IR', 'error');
-    } finally {
-      setSyncLoading(false);
-    }
+      if (newItems.length === 0) return prev;
+
+      return {
+        ...prev,
+        brokers: prev.brokers.map(b => b.id === prev.currentBrokerId ? {
+          ...b,
+          irpfItems: [...existingItems, ...newItems]
+        } : b)
+      };
+    });
   };
 
   const groupedTransactions: Record<string, Transaction[]> = useMemo(() => {
     if (!currentBroker) return {};
     const grouped: Record<string, Transaction[]> = {};
-    [...currentBroker.transactions]
+    [...uniqueTransactions]
       .filter(t => {
         if (!t.date) return false;
         try {
@@ -1440,39 +2640,86 @@ export default function App() {
         } catch (e) {}
       });
     return grouped;
-  }, [currentBroker, filterYear, filterMonth, filterDay, filterType]);
+  }, [uniqueTransactions, filterYear, filterMonth, filterDay, filterType]);
 
   const transactionTotals = useMemo(() => {
-    if (!currentBroker) return { buy: 0, sell: 0, total: 0 };
-    const filtered = (currentBroker.transactions || []).filter(t => {
-      if (!t.date) return false;
+    if (!currentBroker) return { buy: 0, sell: 0, volume: 0, net: 0, costOfSales: 0, realizedProfit: 0 };
+    
+    const assetStates: Record<string, { quantity: number; totalInvested: number }> = {};
+    const assetIdToCode = new Map<string, string>();
+    (currentBroker.assets || []).forEach(a => assetIdToCode.set(a.id, a.code.trim().toUpperCase()));
+
+    let buy = 0;
+    let sell = 0;
+    let costOfSales = 0;
+    let realizedProfit = 0;
+
+    uniqueTransactions.forEach(t => {
+      const code = assetIdToCode.get(t.assetId);
+      if (!code) return; 
+      
+      if (!assetStates[code]) assetStates[code] = { quantity: 0, totalInvested: 0 };
+      const state = assetStates[code];
+      
+      const absQty = Math.abs(t.quantity || 0);
+      const price = t.price || 0;
+      const value = absQty * price;
+      
+      let passesFilter = false;
       try {
-        const date = parseISO(t.date);
-        if (isNaN(date.getTime())) return false;
-        
-        const year = format(date, 'yyyy');
-        const month = format(date, 'MM');
-        const day = format(date, 'dd');
-        
-        const matchYear = filterYear === 'all' || year === filterYear;
-        const matchMonth = filterMonth === 'all' || month === filterMonth;
-        const matchDay = filterDay === 'all' || day === filterDay;
-        const matchType = filterType === 'all' || t.type === filterType;
-        
-        return matchYear && matchMonth && matchDay && matchType;
-      } catch (e) {
-        return false;
+        const date = t.date ? parseISO(t.date) : null;
+        if (date && isValid(date)) {
+          const year = format(date, 'yyyy');
+          const month = format(date, 'MM');
+          const day = format(date, 'dd');
+          const matchYear = filterYear === 'all' || year === filterYear;
+          const matchMonth = filterMonth === 'all' || month === filterMonth;
+          const matchDay = filterDay === 'all' || day === filterDay;
+          const matchType = filterType === 'all' || t.type === filterType;
+          const matchSource = filterSource === 'all' || (t.source || 'Manual') === filterSource;
+          passesFilter = matchYear && matchMonth && matchDay && matchType && matchSource;
+        }
+      } catch(e) {}
+
+      if (t.type === 'Compra') {
+        if (passesFilter) buy += value;
+        state.totalInvested += value;
+        state.quantity += absQty;
+      } else {
+        const avgPrice = state.quantity > 0 ? state.totalInvested / state.quantity : 0;
+        const currentCostOfSale = absQty * avgPrice;
+        const currentProfit = value - currentCostOfSale;
+
+        if (passesFilter) {
+          sell += value;
+          costOfSales += currentCostOfSale;
+          realizedProfit += currentProfit;
+        }
+
+        // Update state (cost basis reduction)
+        if (state.quantity > 0) {
+          const ratio = (state.quantity - absQty) / state.quantity;
+          state.quantity = Math.max(0, state.quantity - absQty);
+          state.totalInvested = state.quantity > 0 ? state.totalInvested * ratio : 0;
+        } else {
+          state.quantity = 0;
+          state.totalInvested = 0;
+        }
       }
     });
 
-    return filtered.reduce((acc, t) => {
-      const value = (t.quantity || 0) * (t.price || 0);
-      if (t.type === 'Compra') acc.buy += value;
-      else acc.sell += value;
-      acc.total += value;
-      return acc;
-    }, { buy: 0, sell: 0, total: 0 });
-  }, [currentBroker, filterYear, filterMonth, filterDay, filterType]);
+    // Calculate total equity at cost (sum of all remaining invested amounts)
+    const totalEquityAtCost = Object.values(assetStates).reduce((acc, curr) => acc + curr.totalInvested, 0);
+
+    return { 
+      buy, 
+      sell, 
+      costOfSales, 
+      realizedProfit, 
+      net: totalEquityAtCost,
+      volume: buy + sell 
+    };
+  }, [uniqueTransactions, filterYear, filterMonth, filterDay, filterType, currentBroker]);
 
   // --- Chart Data ---
 
@@ -1488,6 +2735,78 @@ export default function App() {
     return Object.entries(totals).map(([name, value]) => ({ name, value }));
   }, [currentBroker, assetStats]);
 
+  const monthlyInvestmentsData = useMemo(() => {
+    if (!currentBroker) return [];
+    const months = subMonths(new Date(), 11);
+    const interval = eachMonthOfInterval({ start: months, end: new Date() });
+    
+    return interval.map(date => {
+      const monthStr = format(date, 'yyyy-MM');
+      const filtered = (currentBroker.transactions || []).filter(t => t.date && t.date.startsWith(monthStr) && t.type === 'Compra');
+      return {
+        name: format(date, 'MMM/yy', { locale: ptBR }),
+        total: filtered.reduce((acc, curr) => acc + (curr.quantity * curr.price), 0)
+      };
+    });
+  }, [currentBroker]);
+
+  const equityEvolutionData = useMemo(() => {
+    if (!currentBroker) return [];
+    const months = subMonths(new Date(), 11);
+    const interval = eachMonthOfInterval({ start: months, end: new Date() });
+    
+    const assetIdToCode = new Map<string, string>();
+    (currentBroker.assets || []).forEach(a => assetIdToCode.set(a.id, a.code.trim().toUpperCase()));
+
+    // Track state per asset code to correctly handle cost basis evolution
+    const assetStates: Record<string, { quantity: number; totalInvested: number }> = {};
+    
+    const allTransactions = [...uniqueTransactions]
+      .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+
+    let transactionIdx = 0;
+
+    return interval.map(date => {
+      const monthEnd = endOfMonth(date);
+      const monthEndStr = format(monthEnd, 'yyyy-MM-dd');
+
+      // Process all transactions up to the end of this month
+      while (transactionIdx < allTransactions.length && allTransactions[transactionIdx].date <= monthEndStr) {
+        const t = allTransactions[transactionIdx];
+        const code = assetIdToCode.get(t.assetId) || 'UNKNOWN';
+        
+        if (!assetStates[code]) {
+          assetStates[code] = { quantity: 0, totalInvested: 0 };
+        }
+        
+        const state = assetStates[code];
+        if (t.type === 'Compra') {
+          state.totalInvested += (t.quantity * t.price);
+          state.quantity += t.quantity;
+        } else {
+          const saleQuantity = Math.abs(t.quantity);
+          if (state.quantity > 0) {
+            // Reduce total invested proportionally to the quantity sold (cost basis reduction)
+            const ratio = (state.quantity - saleQuantity) / state.quantity;
+            state.quantity = Math.max(0, state.quantity - saleQuantity);
+            state.totalInvested = state.quantity > 0 ? state.totalInvested * ratio : 0;
+          } else {
+            state.quantity = 0;
+            state.totalInvested = 0;
+          }
+        }
+        transactionIdx++;
+      }
+
+      const totalPatrimonio = Object.values(assetStates).reduce((acc, curr) => acc + curr.totalInvested, 0);
+
+      return {
+        name: format(date, 'MMM/yy', { locale: ptBR }),
+        patrimonio: Math.max(0, totalPatrimonio)
+      };
+    });
+  }, [currentBroker, uniqueTransactions]);
+
   const monthlyDividendsData = useMemo(() => {
     if (!currentBroker) return [];
     const months = subMonths(new Date(), 11);
@@ -1495,71 +2814,66 @@ export default function App() {
     
     return interval.map(date => {
       const monthStr = format(date, 'yyyy-MM');
-      const filtered = (currentBroker.dividends || []).filter(d => d.date.startsWith(monthStr));
+      const filtered = uniqueDividends.filter(d => d.date && d.date.startsWith(monthStr));
       return {
         name: format(date, 'MMM/yy', { locale: ptBR }),
-        total: filtered.reduce((acc, curr) => acc + (curr.dividend_value || 0) + (curr.jcp_value || 0), 0)
+        total: filtered.reduce((acc, curr) => acc + (curr.dividendValue || 0) + (curr.jcpValue || 0), 0)
       };
     });
-  }, [currentBroker]);
+  }, [currentBroker, uniqueDividends]);
 
   // --- Render ---
 
-  if (!supabase) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
-        <Card className="max-w-xl w-full p-8 border-t-4 border-t-red-500 shadow-xl">
-          <div className="flex flex-col items-center text-center space-y-6">
-            <div className="w-16 h-16 bg-red-50 rounded-full flex items-center justify-center">
-              <ShieldCheck className="w-10 h-10 text-red-500" />
-            </div>
-            <div>
-              <h1 className="text-2xl font-black text-slate-800 mb-2">Configuração Necessária</h1>
-              <p className="text-slate-500">O sistema está no ar, mas você ainda não configurou as chaves do banco de dados.</p>
-            </div>
-            
-            <div className="bg-slate-100 p-6 rounded-2xl w-full text-left space-y-4">
-              <p className="text-sm font-bold text-slate-700 uppercase">O que fazer agora:</p>
-              <ol className="text-sm text-slate-600 space-y-2 list-decimal list-inside">
-                <li>Vá no seu painel da **Vercel** ou arquivo **.env**.</li>
-                <li>Adicione as chaves: `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY`.</li>
-                <li>Não esqueça da `VITE_GEMINI_API_KEY` para a IA funcionar.</li>
-                <li>Faça o deploy novamente ou recarregue a página.</li>
-              </ol>
-            </div>
-            
-            <p className="text-xs text-slate-400 italic">Isso evita a "tela branca" e garante que seus dados estejam seguros e persistentes.</p>
-          </div>
-        </Card>
-      </div>
-    );
-  }
-
-  if (authLoading) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
-        <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
-      </div>
-    );
-  }
-
-  if (!user) {
-    return <Login onLogin={fetchData} />;
-  }
-
   return (
     <ErrorBoundary>
-      <div className="min-h-screen bg-slate-50 flex flex-col">
-      {syncLoading && (
-        <div className="fixed top-0 left-0 w-full h-1 bg-blue-500/20 z-[60] overflow-hidden">
+      <AnimatePresence>
+        {isLocked && (
           <motion.div 
-            initial={{ x: '-100%' }}
-            animate={{ x: '100%' }}
-            transition={{ repeat: Infinity, duration: 1.5, ease: 'linear' }}
-            className="w-1/2 h-full bg-blue-600"
-          />
-        </div>
-      )}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] bg-slate-900 flex items-center justify-center p-6"
+          >
+            <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl p-10 text-center space-y-8">
+              <div className="w-20 h-20 bg-blue-100 rounded-2xl flex items-center justify-center mx-auto">
+                <ShieldCheck className="w-10 h-10 text-blue-600" />
+              </div>
+              <div className="space-y-2">
+                <h2 className="text-2xl font-bold text-slate-900">Aplicativo Bloqueado</h2>
+                <p className="text-sm text-slate-500">Seus dados estão protegidos por criptografia. Insira sua senha mestre para acessar.</p>
+              </div>
+              
+              <form 
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const pwd = (e.currentTarget.elements.namedItem('password') as HTMLInputElement).value;
+                  handleUnlock(pwd);
+                }}
+                className="space-y-4"
+              >
+                <Input 
+                  name="password" 
+                  type="password" 
+                  label="Senha Mestre" 
+                  placeholder="Digite sua senha..." 
+                  autoFocus 
+                  required 
+                />
+                <Button type="submit" className="w-full py-3">Desbloquear Dados</Button>
+              </form>
+              
+              <div className="pt-6 border-t border-slate-100">
+                <p className="text-[10px] text-slate-400 leading-relaxed">
+                  <b>Atenção:</b> Se você esquecer sua senha, não será possível recuperar os dados criptografados. 
+                  A criptografia é feita localmente no seu navegador e nós não temos acesso à sua senha.
+                </p>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <div className="min-h-screen bg-slate-50 flex flex-col">
       {!currentBroker ? (
         <div className="flex-1 flex items-center justify-center p-6">
           <motion.div 
@@ -1639,13 +2953,16 @@ export default function App() {
               <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center shadow-lg shadow-blue-200">
                 <TrendingUp className="w-6 h-6 text-white" />
               </div>
-              <div>
-                <h1 className="text-lg font-bold text-slate-900 leading-tight flex items-center">
-                  Gerenciador de IR
-                  <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-700 tracking-wider">
-                    v1.4.0
-                  </span>
-                </h1>
+              <div className="flex flex-col">
+                <div className="flex items-center gap-2">
+                  <h1 className="text-lg font-bold text-slate-900 leading-tight">Gerenciador de IR</h1>
+                  <button 
+                    onClick={() => setIsChangelogModalOpen(true)}
+                    className="px-1.5 py-0.5 bg-blue-100 text-blue-600 hover:bg-blue-200 transition-colors rounded text-[10px] font-mono font-bold cursor-pointer"
+                  >
+                    v{APP_VERSION}
+                  </button>
+                </div>
                 <p className="text-xs text-slate-500 font-medium">{currentBroker?.name || 'Nenhuma corretora selecionada'}</p>
               </div>
             </div>
@@ -1663,8 +2980,14 @@ export default function App() {
               <Button variant="ghost" size="sm" onClick={() => setIsBrokerModalOpen(true)} className="hidden sm:inline-flex">
                 <Building2 className="w-4 h-4 mr-2" /> Corretoras
               </Button>
-              <Button variant="ghost" size="sm" onClick={handleLogout} className="hidden sm:inline-flex text-red-500 hover:bg-red-50">
-                <LogOut className="w-4 h-4 mr-2" /> Sair da Conta
+              <Button variant="ghost" size="sm" onClick={() => setIsSnapshotModalOpen(true)} className="hidden lg:inline-flex">
+                <ArrowLeftRight className="w-4 h-4 mr-2" /> Versões
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setIsSettingsModalOpen(true)} className="hidden sm:inline-flex">
+                <Settings className="w-4 h-4 mr-2" /> IA
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setData(prev => ({ ...prev, currentBrokerId: null }))} className="hidden sm:inline-flex">
+                <LogOut className="w-4 h-4 mr-2" /> Sair
               </Button>
               <div className="md:hidden">
                 <Button variant="secondary" size="sm" onClick={() => setIsBrokerModalOpen(true)}>
@@ -1685,17 +3008,68 @@ export default function App() {
           <TabButton active={activeTab === 'analysis'} onClick={() => setActiveTab('analysis')} icon={<PieChart className="w-4 h-4" />} label="Análises" />
           <TabButton active={activeTab === 'report'} onClick={() => setActiveTab('report')} icon={<FileText className="w-4 h-4" />} label="Portfólio" />
           <TabButton active={activeTab === 'irpf'} onClick={() => setActiveTab('irpf')} icon={<ShieldCheck className="w-4 h-4" />} label="Relatório IRPF" />
+          <button 
+            onClick={() => setIsSnapshotModalOpen(true)}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors bg-slate-50 text-slate-600 hover:bg-slate-100"
+          >
+            <ArrowLeftRight className="w-4 h-4" />
+            <span>Versões</span>
+          </button>
+          <button 
+            onClick={() => setIsSettingsModalOpen(true)}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors bg-slate-50 text-slate-600 hover:bg-slate-100"
+          >
+            <Settings className="w-4 h-4" />
+            <span>IA</span>
+          </button>
         </div>
       </div>
 
       <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-8">
         {/* Summary Stats */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8 no-print">
-          <StatCard title="Patrimônio Total" value={formatCurrency(totalPortfolioValue)} icon={<Wallet className="text-blue-600" />} color="blue" />
+          <div className="relative group">
+            <StatCard title="Patrimônio (Custo)" value={formatCurrency(totalCostBasis)} icon={<Wallet className="text-blue-600" />} color="blue" />
+            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 bg-slate-800 text-white text-[10px] rounded-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50 w-48 text-center shadow-xl">
+              Soma do custo de aquisição de todos os ativos em carteira. Valor base para o IRPF.
+            </div>
+          </div>
+          <div className="relative group">
+            <StatCard title="Patrimônio (Mercado)" value={formatCurrency(totalPortfolioValue)} icon={<Wallet className="text-indigo-600" />} color="indigo" />
+            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 bg-slate-800 text-white text-[10px] rounded-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50 w-48 text-center shadow-xl">
+              Valor atualizado pela cotação de mercado. Reflete o seu poder de compra atual.
+            </div>
+          </div>
           <StatCard title="Total Rendimentos" value={formatCurrency(totalDividends)} icon={<TrendingUp className="text-emerald-600" />} color="emerald" />
-          <StatCard title="Total Ativos" value={currentBroker ? (currentBroker.assets || []).length.toString() : '0'} icon={<PieChart className="text-amber-600" />} color="amber" />
-          <StatCard title="Transações" value={currentBroker ? (currentBroker.transactions || []).length.toString() : '0'} icon={<ArrowLeftRight className="text-violet-600" />} color="violet" />
+          <div className="relative group">
+            <StatCard title="Lucro/Prejuízo Total" value={formatCurrency(totalProfit)} icon={<TrendingUp className={cn(totalProfit >= 0 ? "text-emerald-600" : "text-red-600")} />} color={totalProfit >= 0 ? "emerald" : "amber"} />
+            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 bg-slate-800 text-white text-[10px] rounded-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50 w-48 text-center shadow-xl">
+              Diferença entre o Valor de Mercado e o Custo de Aquisição dos ativos atuais.
+            </div>
+          </div>
         </div>
+
+        {hasDuplicates && (
+          <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-xl flex items-center justify-between gap-4 animate-in fade-in slide-in-from-top-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-amber-100 text-amber-600 rounded-full flex items-center justify-center shrink-0">
+                <AlertCircle className="w-6 h-6" />
+              </div>
+              <div>
+                <p className="text-sm font-bold text-amber-900">Ativos Duplicados Detectados</p>
+                <p className="text-xs text-amber-700">Existem ativos com o mesmo código que podem estar afetando os cálculos.</p>
+              </div>
+            </div>
+            <Button 
+              variant="primary" 
+              size="sm" 
+              className="bg-amber-600 hover:bg-amber-700 border-none"
+              onClick={handleConsolidateData}
+            >
+              Consolidar Agora
+            </Button>
+          </div>
+        )}
 
         <AnimatePresence mode="wait">
           {activeTab === 'assets' && (
@@ -1713,8 +3087,22 @@ export default function App() {
                       className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                     />
                   </div>
+                  <select 
+                    value={assetFilterType}
+                    onChange={(e) => setAssetFilterType(e.target.value)}
+                    className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  >
+                    <option value="all">Todos os Tipos</option>
+                    {ASSET_TYPES.map(t => (
+                      <option key={t} value={t}>{t}</option>
+                    ))}
+                  </select>
                   <Button variant="outline" onClick={() => setIsCnpjModalOpen(true)}>
                     <Building2 className="w-4 h-4 mr-2" /> CNPJs
+                  </Button>
+                  <Button variant="outline" onClick={handleUpdatePrices} disabled={isUpdatingPrices}>
+                    <ArrowLeftRight className={cn("w-4 h-4 mr-2", isUpdatingPrices && "animate-spin")} /> 
+                    {isUpdatingPrices ? 'Atualizando...' : 'Atualizar Preços'}
                   </Button>
                   <Button onClick={() => { setEditingAsset(null); setIsAssetModalOpen(true); }}>
                     <Plus className="w-4 h-4 mr-2" /> Novo
@@ -1732,14 +3120,14 @@ export default function App() {
                             Tipo {sortField === 'type' && (sortDirection === 'asc' ? <ChevronUp className="w-3 h-3 ml-1" /> : <ChevronDown className="w-3 h-3 ml-1" />)}
                           </div>
                         </th>
-                        <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider cursor-pointer hover:text-blue-600 transition-colors" onClick={() => handleSort('name')}>
-                          <div className="flex items-center">
-                            Ativo {sortField === 'name' && (sortDirection === 'asc' ? <ChevronUp className="w-3 h-3 ml-1" /> : <ChevronDown className="w-3 h-3 ml-1" />)}
-                          </div>
-                        </th>
                         <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider cursor-pointer hover:text-blue-600 transition-colors" onClick={() => handleSort('code')}>
                           <div className="flex items-center">
                             Código {sortField === 'code' && (sortDirection === 'asc' ? <ChevronUp className="w-3 h-3 ml-1" /> : <ChevronDown className="w-3 h-3 ml-1" />)}
+                          </div>
+                        </th>
+                        <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider cursor-pointer hover:text-blue-600 transition-colors" onClick={() => handleSort('name')}>
+                          <div className="flex items-center">
+                            Ativo {sortField === 'name' && (sortDirection === 'asc' ? <ChevronUp className="w-3 h-3 ml-1" /> : <ChevronDown className="w-3 h-3 ml-1" />)}
                           </div>
                         </th>
                         <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right cursor-pointer hover:text-blue-600 transition-colors" onClick={() => handleSort('boughtQuantity')}>
@@ -1762,14 +3150,24 @@ export default function App() {
                             Preço Médio {sortField === 'avgPrice' && (sortDirection === 'asc' ? <ChevronUp className="w-3 h-3 ml-1" /> : <ChevronDown className="w-3 h-3 ml-1" />)}
                           </div>
                         </th>
-                        <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right cursor-pointer hover:text-blue-600 transition-colors" onClick={() => handleSort('totalInvested')}>
+                        <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right cursor-pointer hover:text-blue-600 transition-colors" onClick={() => handleSort('currentPrice')}>
                           <div className="flex items-center justify-end">
-                            Investimento Total {sortField === 'totalInvested' && (sortDirection === 'asc' ? <ChevronUp className="w-3 h-3 ml-1" /> : <ChevronDown className="w-3 h-3 ml-1" />)}
+                            Preço Atual {sortField === 'currentPrice' && (sortDirection === 'asc' ? <ChevronUp className="w-3 h-3 ml-1" /> : <ChevronDown className="w-3 h-3 ml-1" />)}
                           </div>
                         </th>
-                        <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">
+                        <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right cursor-pointer hover:text-blue-600 transition-colors" onClick={() => handleSort('totalInvested')}>
                           <div className="flex items-center justify-end">
-                            Yield on Cost
+                            Custo de Aquisição {sortField === 'totalInvested' && (sortDirection === 'asc' ? <ChevronUp className="w-3 h-3 ml-1" /> : <ChevronDown className="w-3 h-3 ml-1" />)}
+                          </div>
+                        </th>
+                        <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right cursor-pointer hover:text-blue-600 transition-colors" onClick={() => handleSort('currentValue')}>
+                          <div className="flex items-center justify-end">
+                            Valor de Mercado {sortField === 'currentValue' && (sortDirection === 'asc' ? <ChevronUp className="w-3 h-3 ml-1" /> : <ChevronDown className="w-3 h-3 ml-1" />)}
+                          </div>
+                        </th>
+                        <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right cursor-pointer hover:text-blue-600 transition-colors" onClick={() => handleSort('profit')}>
+                          <div className="flex items-center justify-end">
+                            Lucro/Prejuízo {sortField === 'profit' && (sortDirection === 'asc' ? <ChevronUp className="w-3 h-3 ml-1" /> : <ChevronDown className="w-3 h-3 ml-1" />)}
                           </div>
                         </th>
                         <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-center">Ações</th>
@@ -1800,18 +3198,31 @@ export default function App() {
                                   {asset.type}
                                 </span>
                               </td>
-                              <td className="px-6 py-4 font-semibold text-slate-900">{asset.name}</td>
-                              <td className="px-6 py-4 font-mono text-sm text-slate-500">{asset.code}</td>
+                              <td className="px-6 py-4 font-mono text-sm font-bold text-slate-900">{asset.code}</td>
+                              <td className="px-6 py-4 font-medium text-slate-600">{asset.name}</td>
                               <td className="px-6 py-4 text-right text-slate-600">{stats?.boughtQuantity?.toLocaleString('pt-BR') || '0'}</td>
                               <td className="px-6 py-4 text-right text-slate-600">{stats?.soldQuantity?.toLocaleString('pt-BR') || '0'}</td>
                               <td className="px-6 py-4 text-right font-medium text-slate-700">{stats?.quantity?.toLocaleString('pt-BR') || '0'}</td>
                               <td className="px-6 py-4 text-right text-slate-600">{formatCurrency(stats?.avgPrice || 0)}</td>
+                              <td className="px-6 py-4 text-right text-slate-600">{stats?.currentPrice ? formatCurrency(stats.currentPrice) : '-'}</td>
                               <td className="px-6 py-4 text-right font-bold text-slate-900">{formatCurrency(stats?.totalInvested || 0)}</td>
-                              <td className="px-6 py-4 text-right text-emerald-600 font-bold">
-                                {stats?.yieldOnCost ? `${stats.yieldOnCost.toFixed(2)}%` : '0.00%'}
+                              <td className="px-6 py-4 text-right font-bold text-slate-900">{stats?.currentPrice ? formatCurrency(stats.currentValue) : '-'}</td>
+                              <td className={cn(
+                                "px-6 py-4 text-right font-bold",
+                                (stats?.profit || 0) > 0 ? "text-emerald-600" : (stats?.profit || 0) < 0 ? "text-red-600" : "text-slate-600"
+                              )}>
+                                {stats?.currentPrice ? (
+                                  <div className="flex flex-col items-end">
+                                    <span>{formatCurrency(stats.profit)}</span>
+                                    <span className="text-[10px] font-medium">({stats.profitPercentage.toFixed(2)}%)</span>
+                                  </div>
+                                ) : '-'}
                               </td>
                               <td className="px-6 py-4">
                                 <div className="flex justify-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                  <Button variant="ghost" size="sm" onClick={() => { setSelectedAssetForHistory(asset); setIsTransactionHistoryOpen(true); }} title="Ver Histórico">
+                                    <ArrowLeftRight className="w-4 h-4" />
+                                  </Button>
                                   <Button variant="ghost" size="sm" onClick={() => { setEditingAsset(asset); setIsAssetModalOpen(true); }}>
                                     <Edit2 className="w-4 h-4" />
                                   </Button>
@@ -1840,6 +3251,9 @@ export default function App() {
                 </div>
                 <div className="flex flex-wrap gap-2 w-full lg:w-auto">
                   <div className="flex gap-2 flex-1 lg:flex-none">
+                    <Button variant="outline" size="sm" onClick={handleConsolidateData} title="Remover duplicatas e consolidar ativos">
+                      <RefreshCw className="w-4 h-4 mr-2" /> Consolidar
+                    </Button>
                     <select 
                       value={filterYear} 
                       onChange={(e) => setFilterYear(e.target.value)}
@@ -1883,6 +3297,17 @@ export default function App() {
                       <option value="Compra">Apenas Compras</option>
                       <option value="Venda">Apenas Vendas</option>
                     </select>
+                    <select 
+                      value={filterSource} 
+                      onChange={(e) => setFilterSource(e.target.value)}
+                      className="bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                    >
+                      <option value="all">Todas as Fontes</option>
+                      <option value="Nota de Corretagem">Nota de Corretagem</option>
+                      <option value="Informe de Rendimentos">Informe de Rendimentos</option>
+                      <option value="Extrato de Custódia">Extrato de Custódia</option>
+                      <option value="Manual">Manual</option>
+                    </select>
                   </div>
                   <div className="flex gap-2 w-full lg:w-auto">
                     <Button variant="outline" className="flex-1 lg:flex-none" onClick={() => setIsPdfModalOpen(true)}>
@@ -1897,20 +3322,34 @@ export default function App() {
 
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
                 <Card className="p-4 bg-blue-50 border-blue-100">
-                  <p className="text-xs font-bold text-blue-600 uppercase tracking-wider mb-1">Patrimônio Filtrado</p>
-                  <p className="text-xl font-bold text-blue-900">{formatCurrency(transactionTotals.buy - transactionTotals.sell)}</p>
-                </Card>
-                <Card className="p-4 bg-emerald-50 border-emerald-100">
-                  <p className="text-xs font-bold text-emerald-600 uppercase tracking-wider mb-1">Total de Compras</p>
-                  <p className="text-xl font-bold text-emerald-900">{formatCurrency(transactionTotals.buy)}</p>
+                  <p className="text-xs font-bold text-blue-600 uppercase tracking-wider mb-1">
+                    {filterYear === 'all' && filterMonth === 'all' ? 'Total de Compras' : 'Compras no Período'}
+                  </p>
+                  <p className="text-xl font-bold text-blue-900">{formatCurrency(transactionTotals.buy)}</p>
                 </Card>
                 <Card className="p-4 bg-red-50 border-red-100">
-                  <p className="text-xs font-bold text-red-600 uppercase tracking-wider mb-1">Total de Vendas</p>
-                  <p className="text-xl font-bold text-red-900">{formatCurrency(transactionTotals.sell)}</p>
+                  <p className="text-xs font-bold text-red-600 uppercase tracking-wider mb-1">
+                    {filterYear === 'all' && filterMonth === 'all' ? 'Custo das Vendas (Baixas)' : 'Vendas no Período'}
+                  </p>
+                  <p className="text-xl font-bold text-red-900">
+                    {filterYear === 'all' && filterMonth === 'all' 
+                      ? formatCurrency(transactionTotals.costOfSales) 
+                      : formatCurrency(transactionTotals.sell)}
+                  </p>
                 </Card>
-                <Card className="p-4 bg-slate-50 border-slate-200">
-                  <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Total da Operação</p>
-                  <p className="text-xl font-bold text-slate-900">{formatCurrency(transactionTotals.total)}</p>
+                <Card className="p-4 bg-emerald-50 border-emerald-100">
+                  <p className="text-xs font-bold text-emerald-600 uppercase tracking-wider mb-1">Lucro Realizado</p>
+                  <p className="text-xl font-bold text-emerald-900">{formatCurrency(transactionTotals.realizedProfit)}</p>
+                </Card>
+                <Card className="p-4 bg-indigo-50 border-indigo-100">
+                  <p className="text-xs font-bold text-indigo-600 uppercase tracking-wider mb-1">
+                    {filterYear === 'all' && filterMonth === 'all' ? 'Patrimônio (Custo)' : 'Saldo do Período'}
+                  </p>
+                  <p className="text-xl font-bold text-indigo-900">
+                    {filterYear === 'all' && filterMonth === 'all' 
+                      ? formatCurrency(transactionTotals.net) 
+                      : formatCurrency(transactionTotals.buy - transactionTotals.sell)}
+                  </p>
                 </Card>
               </div>
 
@@ -1930,6 +3369,7 @@ export default function App() {
                               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Data</th>
                               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Ativo</th>
                               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Tipo</th>
+                              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Fonte</th>
                               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">Qtd</th>
                               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">Preço</th>
                               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">Total</th>
@@ -1938,10 +3378,12 @@ export default function App() {
                           </thead>
                           <tbody className="divide-y divide-slate-100">
                             {(transactions as Transaction[]).map(t => {
-                              const asset = (currentBroker.assets || []).find(a => a.id === t.asset_id);
+                              const asset = (currentBroker.assets || []).find(a => a.id === t.assetId);
                               return (
                                 <tr key={t.id} className="hover:bg-slate-50 transition-colors">
-                                  <td className="px-6 py-4 text-sm text-slate-600">{format(parseISO(t.date), 'dd/MM/yyyy')}</td>
+                                  <td className="px-6 py-4 text-sm text-slate-600">
+                                  {t.date && isValid(parseISO(t.date)) ? format(parseISO(t.date), 'dd/MM/yyyy') : '-'}
+                                </td>
                                   <td className="px-6 py-4 font-semibold text-slate-900">{asset?.code || 'Desconhecido'}</td>
                                   <td className="px-6 py-4">
                                     <span className={cn(
@@ -1950,6 +3392,9 @@ export default function App() {
                                     )}>
                                       {t.type}
                                     </span>
+                                  </td>
+                                  <td className="px-6 py-4 text-[10px] text-slate-400 font-medium italic">
+                                    {t.source || 'Manual'}
                                   </td>
                                   <td className="px-6 py-4 text-right text-slate-700">{t.quantity.toLocaleString('pt-BR')}</td>
                                   <td className="px-6 py-4 text-right text-slate-600">{formatCurrency(t.price)}</td>
@@ -2025,6 +3470,22 @@ export default function App() {
                   </Button>
                 </div>
               </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                <Card className="p-4 bg-emerald-50 border-emerald-100">
+                  <p className="text-xs font-bold text-emerald-600 uppercase tracking-wider mb-1">Dividendos Filtrados</p>
+                  <p className="text-2xl font-bold text-emerald-700">{formatCurrency(filteredDividendsTotals.dividend)}</p>
+                </Card>
+                <Card className="p-4 bg-blue-50 border-blue-100">
+                  <p className="text-xs font-bold text-blue-600 uppercase tracking-wider mb-1">JCP Filtrado</p>
+                  <p className="text-2xl font-bold text-blue-700">{formatCurrency(filteredDividendsTotals.jcp)}</p>
+                </Card>
+                <Card className="p-4 bg-indigo-50 border-indigo-100">
+                  <p className="text-xs font-bold text-indigo-600 uppercase tracking-wider mb-1">Total Filtrado</p>
+                  <p className="text-2xl font-bold text-indigo-700">{formatCurrency(filteredDividendsTotals.total)}</p>
+                </Card>
+              </div>
+
               <Card className="p-0">
                 <div className="overflow-x-auto">
                   <table className="w-full text-left border-collapse">
@@ -2047,14 +3508,16 @@ export default function App() {
                           </tr>
                         ) : (
                           filteredDividends.map(d => {
-                            const asset = (currentBroker.assets || []).find(a => a.id === d.asset_id);
+                            const asset = (currentBroker.assets || []).find(a => a.id === d.assetId);
                             return (
                               <tr key={d.id} className="hover:bg-slate-50 transition-colors">
-                                <td className="px-6 py-4 text-sm text-slate-600">{format(parseISO(d.date), 'dd/MM/yyyy')}</td>
+                                <td className="px-6 py-4 text-sm text-slate-600">
+                                  {d.date && isValid(parseISO(d.date)) ? format(parseISO(d.date), 'dd/MM/yyyy') : '-'}
+                                </td>
                                 <td className="px-6 py-4 font-semibold text-slate-900">{asset?.code || 'Desconhecido'}</td>
-                                <td className="px-6 py-4 text-right text-emerald-600">{formatCurrency(d.dividend_value)}</td>
-                                <td className="px-6 py-4 text-right text-blue-600">{formatCurrency(d.jcp_value)}</td>
-                                <td className="px-6 py-4 text-right font-bold text-slate-900">{formatCurrency((d.dividend_value || 0) + (d.jcp_value || 0))}</td>
+                                <td className="px-6 py-4 text-right text-emerald-600">{formatCurrency(d.dividendValue)}</td>
+                                <td className="px-6 py-4 text-right text-blue-600">{formatCurrency(d.jcpValue)}</td>
+                                <td className="px-6 py-4 text-right font-bold text-slate-900">{formatCurrency((d.dividendValue || 0) + (d.jcpValue || 0))}</td>
                                 <td className="px-6 py-4 text-center">
                                   <Button variant="ghost" size="sm" onClick={() => handleDeleteDividend(d.id)} className="text-red-500">
                                     <Trash2 className="w-4 h-4" />
@@ -2074,6 +3537,22 @@ export default function App() {
           {activeTab === 'analysis' && (
             <motion.div key="analysis" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="space-y-6">
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <Card title="Evolução do Patrimônio (Custo de Aquisição)">
+                  <div className="h-[300px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={equityEvolutionData}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                        <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#64748b' }} />
+                        <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#64748b' }} tickFormatter={(val) => `R$ ${val}`} />
+                        <Tooltip formatter={(value: number) => formatCurrency(value)} />
+                        <Line type="monotone" dataKey="patrimonio" stroke="#3b82f6" strokeWidth={3} dot={{ r: 4, fill: '#3b82f6' }} activeDot={{ r: 6 }} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </Card>
+
+
+
                 <Card title="Alocação por Tipo">
                   <div className="h-[300px] w-full">
                     <ResponsiveContainer width="100%" height="100%">
@@ -2098,7 +3577,7 @@ export default function App() {
                   </div>
                 </Card>
 
-                <Card title="Rendimentos Mensais (Últimos 12 meses)">
+                <Card title="Rendimentos Mensais (Dividendos/JCP)">
                   <div className="h-[300px] w-full">
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart data={monthlyDividendsData}>
@@ -2151,7 +3630,9 @@ export default function App() {
                             
                             return (
                               <tr key={data.month} className="hover:bg-slate-50 transition-colors">
-                                <td className="py-4 font-medium text-slate-900">{format(parseISO(`${data.month}-01`), 'MMMM/yyyy', { locale: ptBR })}</td>
+                                <td className="py-4 font-medium text-slate-900">
+                                  {isValid(parseISO(`${data.month}-01`)) ? format(parseISO(`${data.month}-01`), 'MMMM/yyyy', { locale: ptBR }) : data.month}
+                                </td>
                                 <td className="py-4 text-right text-slate-600">{formatCurrency(data.stockSales)}</td>
                                 <td className={`py-4 text-right font-medium ${totalProfit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                                   {formatCurrency(totalProfit)}
@@ -2194,6 +3675,112 @@ export default function App() {
                   )}
                 </div>
               </Card>
+
+              {/* Data Audit Section */}
+              <Card className="p-6 border-amber-100 bg-amber-50/30">
+                <div className="flex items-center gap-2 mb-4">
+                  <AlertCircle className="w-5 h-5 text-amber-600" />
+                  <h3 className="text-lg font-bold text-slate-900">Auditoria de Dados</h3>
+                </div>
+                <p className="text-sm text-slate-600 mb-6">
+                  Esta seção ajuda a identificar possíveis erros em seus documentos ou no sistema, como transações duplicadas ou saldos inconsistentes.
+                </p>
+
+                <div className="space-y-4">
+                  {/* Negative Quantities */}
+                  {Object.entries(assetStats).filter(([_, s]: [string, any]) => s.quantity < 0).length > 0 && (
+                    <div className="p-4 bg-white border border-red-100 rounded-lg shadow-sm">
+                      <h4 className="text-sm font-bold text-red-700 mb-2 flex items-center">
+                        <ArrowLeftRight className="w-4 h-4 mr-2" /> Saldo Negativo Detectado
+                      </h4>
+                      <p className="text-xs text-slate-500 mb-3">Estes ativos possuem mais vendas do que compras registradas. Isso indica que faltam documentos de compra no sistema.</p>
+                      <ul className="space-y-1">
+                        {Object.entries(assetStats).filter(([_, s]: [string, any]) => s.quantity < 0).map(([id, s]: [string, any]) => {
+                          const asset = (currentBroker?.assets || []).find(a => a.id === id);
+                          return (
+                            <li key={id} className="text-xs font-mono text-red-600">
+                              {asset?.code}: {s.quantity.toLocaleString('pt-BR')} cotas
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Potential Duplicates */}
+                  {(() => {
+                    const potentialDuplicates: any[] = [];
+                    const seen = new Set<string>();
+                    const transactions = currentBroker?.transactions || [];
+                    
+                    transactions.forEach((t, i) => {
+                      const key = `${t.date}-${t.assetId}-${t.type}-${t.quantity}-${t.price}`;
+                      for (let j = i + 1; j < transactions.length; j++) {
+                        const t2 = transactions[j];
+                        const key2 = `${t2.date}-${t2.assetId}-${t2.type}-${t2.quantity}-${t2.price}`;
+                        if (key === key2 && !seen.has(key)) {
+                          potentialDuplicates.push(t);
+                          seen.add(key);
+                        }
+                      }
+                    });
+
+                    if (potentialDuplicates.length === 0) return null;
+
+                    return (
+                      <div className="p-4 bg-white border border-amber-100 rounded-lg shadow-sm">
+                        <h4 className="text-sm font-bold text-amber-700 mb-2 flex items-center">
+                          <CheckCircle2 className="w-4 h-4 mr-2" /> Possíveis Duplicatas
+                        </h4>
+                        <p className="text-xs text-slate-500 mb-3">Foram encontradas transações com os mesmos dados no mesmo dia. Use o botão "Consolidar" na aba Transações para resolver.</p>
+                        <ul className="space-y-1">
+                          {potentialDuplicates.slice(0, 5).map(t => {
+                            const asset = (currentBroker?.assets || []).find(a => a.id === t.assetId);
+                            return (
+                              <li key={t.id} className="text-xs font-mono text-amber-600">
+                                {t.date}: {t.type} {asset?.code} ({t.quantity} x {formatCurrency(t.price)})
+                              </li>
+                            );
+                          })}
+                          {potentialDuplicates.length > 5 && <li className="text-xs text-slate-400">... e mais {potentialDuplicates.length - 5} itens.</li>}
+                        </ul>
+                      </div>
+                    );
+                  })()}
+
+                  {/* High Value Transactions */}
+                  {(() => {
+                    const highValue = (currentBroker?.transactions || []).filter(t => t.quantity * t.price > 100000);
+                    if (highValue.length === 0) return null;
+
+                    return (
+                      <div className="p-4 bg-white border border-blue-100 rounded-lg shadow-sm">
+                        <h4 className="text-sm font-bold text-blue-700 mb-2 flex items-center">
+                          <TrendingUp className="w-4 h-4 mr-2" /> Transações de Alto Valor
+                        </h4>
+                        <p className="text-xs text-slate-500 mb-3">Estas transações possuem valores individuais acima de R$ 100.000,00. Verifique se os números foram lidos corretamente.</p>
+                        <ul className="space-y-1">
+                          {highValue.slice(0, 5).map(t => {
+                            const asset = (currentBroker?.assets || []).find(a => a.id === t.assetId);
+                            return (
+                              <li key={t.id} className="text-xs font-mono text-blue-600">
+                                {t.date}: {t.type} {asset?.code} - {formatCurrency(t.quantity * t.price)}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      </div>
+                    );
+                  })()}
+
+                  {Object.entries(assetStats).filter(([_, s]: [string, any]) => s.quantity < 0).length === 0 && 
+                   (currentBroker?.transactions || []).filter(t => t.quantity * t.price > 100000).length === 0 && (
+                    <div className="flex items-center justify-center p-8 text-slate-400 italic text-sm">
+                      Nenhuma inconsistência óbvia detectada nos dados atuais.
+                    </div>
+                  )}
+                </div>
+              </Card>
             </motion.div>
           )}
 
@@ -2202,6 +3789,16 @@ export default function App() {
               <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
                 <h2 className="text-2xl font-bold text-slate-900">Relatório de Portfólio</h2>
                 <div className="flex flex-wrap gap-2 no-print w-full md:w-auto">
+                  <select 
+                    value={irpfYear} 
+                    onChange={(e) => setIrpfYear(e.target.value)}
+                    className="bg-white border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  >
+                    {Array.from({ length: 5 }, (_, i) => {
+                      const year = new Date().getFullYear() - i - 1;
+                      return <option key={year} value={year.toString()}>Ano-Calendário {year}</option>;
+                    })}
+                  </select>
                   <div className="relative flex-1 md:w-64">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                     <input 
@@ -2244,77 +3841,62 @@ export default function App() {
 
                   return (
                     <div key={type} className="space-y-6">
-                      <div className="flex justify-between items-end border-b border-slate-200 pb-2">
-                        <h3 className="text-lg font-bold text-slate-800">{type}</h3>
-                        <div className="text-right">
-                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Total na Categoria</p>
-                          <p className="text-sm font-bold text-slate-700">
-                            {formatCurrency(activeAssets.reduce((acc, a) => acc + (assetStats[a.id]?.totalInvested || 0), 0))}
-                          </p>
-                        </div>
-                      </div>
+                      <h3 className="text-lg font-bold text-slate-800 border-b border-slate-200 pb-2">{type}</h3>
                       <div className="grid grid-cols-1 gap-6">
                         {activeAssets.map(asset => {
                           const stats = assetStats[asset.id];
-                          const assetDivs = currentBroker ? (currentBroker.dividends || []).filter(d => d.asset_id === asset.id) : [];
-                          const totalDiv = assetDivs.reduce((acc, curr) => acc + (curr.dividend_value || 0) + (curr.jcp_value || 0), 0);
-                          
-                          return (
-                            <Card key={asset.id} className="p-6 border-l-4 border-l-blue-500 bg-white shadow-md hover:shadow-lg transition-shadow">
-                              <div className="flex flex-col md:flex-row justify-between gap-6">
-                                <div className="space-y-4 flex-1">
-                                  <div className="flex items-center gap-3">
-                                    <div className="px-3 py-1 bg-blue-50 text-blue-700 rounded-lg font-bold text-lg border border-blue-100 uppercase tracking-wider">
-                                      {asset.code}
-                                    </div>
-                                    <h4 className="text-xl font-black text-slate-800">{asset.name}</h4>
-                                  </div>
-                                  
-                                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                                    <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
-                                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Posição Atual</p>
-                                      <p className="text-lg font-bold text-slate-900">{stats?.quantity?.toLocaleString('pt-BR')} cotas</p>
-                                    </div>
-                                    <div className="p-3 bg-blue-50 rounded-xl border border-blue-100 font-medium">
-                                      <p className="text-[10px] font-bold text-blue-400 uppercase tracking-widest mb-1">Custo Médio</p>
-                                      <p className="text-lg font-bold text-blue-900">{formatCurrency(stats?.avgPrice || 0)}</p>
-                                    </div>
-                                    <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-100 font-medium">
-                                      <p className="text-[10px] font-bold text-emerald-400 uppercase tracking-widest mb-1">Total Recebido</p>
-                                      <p className="text-lg font-bold text-emerald-900">{formatCurrency(totalDiv)}</p>
-                                    </div>
-                                    <div className="p-3 bg-indigo-50 rounded-xl border border-indigo-100 font-medium">
-                                      <p className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest mb-1">Yield on Cost</p>
-                                      <p className="text-lg font-bold text-indigo-900">{stats?.yieldOnCost?.toFixed(2)}%</p>
-                                    </div>
-                                  </div>
+                          const assetDivs = currentBroker ? (currentBroker.dividends || []).filter(d => d.assetId === asset.id) : [];
+                          const totalDiv = assetDivs.reduce((acc, curr) => acc + (curr.dividendValue || 0) + (curr.jcpValue || 0), 0);
+                          const yieldOnCost = stats.totalInvested > 0 ? (totalDiv / stats.totalInvested) * 100 : 0;
 
-                                  {asset.cnpj && (
-                                    <div className="flex items-center gap-2 text-xs text-slate-400 font-mono">
-                                      <Building2 className="w-3 h-3" />
-                                      CNPJ: {asset.cnpj}
-                                    </div>
-                                  )}
+                          return (
+                            <div key={asset.id} className="print-break-inside-avoid">
+                              <Card className="print:shadow-none print:border-slate-300">
+                                <div className="p-4">
+                                <div className="flex justify-between items-start mb-4">
+                                  <div>
+                                    <h4 className="font-bold text-slate-900 text-lg">{asset.code} - {asset.name}</h4>
+                                    <p className="text-sm text-slate-500 font-mono">{asset.cnpj || 'CNPJ não informado'}</p>
+                                  </div>
+                                  <div className="text-right">
+                                    <p className="text-xs font-bold text-slate-400 uppercase tracking-wider">Custo Total</p>
+                                    <p className="text-xl font-bold text-blue-600">{formatCurrency(stats.totalInvested)}</p>
+                                  </div>
                                 </div>
                                 
-                                <div className="md:w-64 pt-4 md:pt-0 flex flex-col justify-center border-t md:border-t-0 md:border-l border-slate-100 md:pl-6">
-                                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Investimento Total</p>
-                                  <p className="text-2xl font-black text-slate-900">{formatCurrency(stats?.totalInvested || 0)}</p>
-                                  <div className="mt-4 pt-4 border-t border-slate-100 space-y-2">
-                                    <div className="flex justify-between text-xs">
-                                      <span className="text-slate-500">Cotas Compradas:</span>
-                                      <span className="font-bold text-slate-700">{stats?.boughtQuantity?.toLocaleString('pt-BR')}</span>
-                                    </div>
-                                    <div className="flex justify-between text-xs">
-                                      <span className="text-slate-500">Cotas Vendidas:</span>
-                                      <span className="font-bold text-slate-700">{stats?.soldQuantity?.toLocaleString('pt-BR')}</span>
-                                    </div>
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 py-4 border-y border-slate-100 mb-4">
+                                  <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Quantidade Atual</p>
+                                    <p className="text-sm font-semibold text-slate-700">{stats.quantity.toLocaleString('pt-BR')}</p>
                                   </div>
+                                  <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Preço Médio</p>
+                                    <p className="text-sm font-semibold text-slate-700">{formatCurrency(stats.avgPrice)}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Rendimentos Totais</p>
+                                    <p className="text-sm font-semibold text-emerald-600">{formatCurrency(totalDiv)}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase">Yield on Cost</p>
+                                    <p className="text-sm font-semibold text-blue-600">{yieldOnCost.toFixed(2)}%</p>
+                                  </div>
+                                </div>
+
+                                <div className="bg-slate-50 p-4 rounded-xl border border-slate-100">
+                                  <div className="flex items-center gap-2 mb-2">
+                                    <FileText className="w-4 h-4 text-slate-400" />
+                                    <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Discriminação para Bens e Direitos (IRPF)</p>
+                                  </div>
+                                  <p className="text-sm text-slate-600 leading-relaxed italic">
+                                    "{getBensEDireitosDescription(asset, stats, parseInt(irpfYear))}"
+                                  </p>
                                 </div>
                               </div>
                             </Card>
-                          );
-                        })}
+                          </div>
+                        );
+                      })}
                       </div>
                     </div>
                   );
@@ -2325,9 +3907,23 @@ export default function App() {
 
           {activeTab === 'irpf' && (
             <motion.div key="irpf" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}>
-              <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
+              {(() => {
+                const calendarYear = parseInt(irpfYear);
+                return (
+                  <>
+                    <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
                 <h2 className="text-2xl font-bold text-slate-900">Relatório para IRPF</h2>
                 <div className="flex flex-wrap gap-2 no-print w-full md:w-auto">
+                  <select 
+                    value={irpfYear} 
+                    onChange={(e) => setIrpfYear(e.target.value)}
+                    className="bg-white border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  >
+                    {Array.from({ length: 5 }, (_, i) => {
+                      const year = new Date().getFullYear() - i - 1;
+                      return <option key={year} value={year.toString()}>Ano-Calendário {year}</option>;
+                    })}
+                  </select>
                   <select 
                     value={irpfFilterTopic} 
                     onChange={(e) => setIrpfFilterTopic(e.target.value)}
@@ -2373,6 +3969,143 @@ export default function App() {
                       );
                     }
                     return null;
+                  }
+
+                  if (topic === 'Bens e Direitos') {
+                    return (
+                      <div key={topic} className="space-y-0 border border-slate-200 rounded-lg overflow-hidden shadow-sm">
+                        {/* Header estilo Receita */}
+                        <div className="bg-[#004b8d] text-white px-4 py-3 flex justify-between items-center">
+                          <div className="flex items-center gap-2">
+                            <ShieldCheck className="w-5 h-5" />
+                            <h3 className="text-lg font-bold uppercase tracking-wide">Bens e Direitos</h3>
+                          </div>
+                          <Star className="w-5 h-5 text-white/50" />
+                        </div>
+
+                        {/* Info Box estilo Receita */}
+                        <div className="bg-[#e3f2fd] border-b border-slate-200 p-4 flex gap-3 items-start">
+                          <Info className="w-5 h-5 text-[#01579b] shrink-0 mt-0.5" />
+                          <p className="text-sm text-[#01579b] leading-relaxed">
+                            Nesta ficha devem ser informados os bens e direitos, no Brasil e no exterior, de propriedade do contribuinte e seus dependentes em 31/12/{calendarYear}. 
+                            Utilize o botão "Marcar" para controlar quais itens você já lançou no programa oficial.
+                          </p>
+                        </div>
+
+                        {/* Tabela estilo Receita */}
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left border-collapse bg-white">
+                            <thead>
+                              <tr className="bg-slate-50 border-b border-slate-200">
+                                <th className="px-4 py-3 text-[10px] font-bold text-[#004b8d] uppercase tracking-wider w-12">Marcar</th>
+                                <th className="px-4 py-3 text-[10px] font-bold text-[#004b8d] uppercase tracking-wider w-16">Item</th>
+                                <th className="px-4 py-3 text-[10px] font-bold text-[#004b8d] uppercase tracking-wider w-16">Grupo</th>
+                                <th className="px-4 py-3 text-[10px] font-bold text-[#004b8d] uppercase tracking-wider w-16">Cód.</th>
+                                <th className="px-4 py-3 text-[10px] font-bold text-[#004b8d] uppercase tracking-wider">Discriminação</th>
+                                <th className="px-4 py-3 text-[10px] font-bold text-[#004b8d] uppercase tracking-wider text-right w-32">Situação em 31/12/{calendarYear - 1} (R$)</th>
+                                <th className="px-4 py-3 text-[10px] font-bold text-[#004b8d] uppercase tracking-wider text-right w-32">Situação em 31/12/{calendarYear} (R$)</th>
+                                <th className="px-4 py-3 text-[10px] font-bold text-[#004b8d] uppercase tracking-wider text-center w-24 no-print">Ações</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                              {items.map((item, idx) => {
+                                const isDeclared = (currentBroker?.declaredItemIds || []).includes(item.id);
+                                return (
+                                  <tr key={item.id} className={cn(
+                                    "hover:bg-blue-50/30 transition-colors group",
+                                    idx % 2 === 0 ? "bg-white" : "bg-slate-50/50",
+                                    isDeclared && "bg-emerald-50/30"
+                                  )}>
+                                    <td className="px-4 py-3 text-center">
+                                      <button 
+                                        onClick={() => toggleDeclaredItem(item.id)}
+                                        className={cn(
+                                          "w-5 h-5 rounded border flex items-center justify-center transition-all",
+                                          isDeclared 
+                                            ? "bg-emerald-500 border-emerald-600 text-white" 
+                                            : "bg-white border-slate-300 text-transparent hover:border-blue-400"
+                                        )}
+                                      >
+                                        <Check className="w-3.5 h-3.5" />
+                                      </button>
+                                    </td>
+                                    <td className="px-4 py-3 text-xs font-mono text-slate-500">{idx + 1}</td>
+                                    <td className="px-4 py-3 text-xs font-bold text-slate-700">{item.group || '--'}</td>
+                                    <td className="px-4 py-3 text-xs font-bold text-slate-700">{item.code}</td>
+                                    <td className="px-4 py-3">
+                                      <div className="space-y-1">
+                                        <p className="text-xs text-slate-700 leading-relaxed line-clamp-3 group-hover:line-clamp-none">
+                                          {item.description}
+                                        </p>
+                                        {item.cnpj && (
+                                          <p className="text-[10px] font-mono text-slate-400">CNPJ: {item.cnpj}</p>
+                                        )}
+                                      </div>
+                                    </td>
+                                    <td className="px-4 py-3 text-xs font-mono text-slate-600 text-right">
+                                      {formatCurrency(item.previousValue || 0)}
+                                    </td>
+                                    <td className="px-4 py-3 text-xs font-mono font-bold text-blue-700 text-right">
+                                      {formatCurrency(item.value)}
+                                    </td>
+                                    <td className="px-4 py-3 text-center no-print">
+                                      <div className="flex justify-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                        <button 
+                                          onClick={() => {
+                                            setSelectedIrpfItem(item);
+                                            setIsIrpfModalOpen(true);
+                                          }}
+                                          className="p-1.5 text-blue-600 hover:bg-blue-100 rounded"
+                                          title="Editar"
+                                        >
+                                          <Edit2 className="w-3.5 h-3.5" />
+                                        </button>
+                                        {!item.id.toString().startsWith('auto-') && (
+                                          <button 
+                                            onClick={() => handleDeleteIrpfItem(item.id)}
+                                            className="p-1.5 text-red-600 hover:bg-red-100 rounded"
+                                            title="Excluir"
+                                          >
+                                            <Trash2 className="w-3.5 h-3.5" />
+                                          </button>
+                                        )}
+                                      </div>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+
+                        {/* Footer Buttons estilo Receita */}
+                        <div className="bg-slate-50 border-t border-slate-200 p-4 flex flex-wrap justify-between items-center gap-4 no-print">
+                          <div className="flex gap-2">
+                            <Button variant="outline" size="sm" onClick={() => {
+                              // Repetir valores: copia valores de 31/12/anterior para 31/12/atual se for manual?
+                              // Ou apenas um placeholder para função semelhante
+                              showNotify('Função "Repetir Valores" em desenvolvimento. Ela copiará os saldos do ano anterior.');
+                            }}>
+                              <RefreshCw className="w-4 h-4 mr-2" /> Repetir valores
+                            </Button>
+                          </div>
+                          <div className="flex gap-2">
+                            <Button variant="outline" size="sm" onClick={() => {
+                              setSelectedIrpfItem(null);
+                              setIsIrpfModalOpen(true);
+                            }}>
+                              <Plus className="w-4 h-4 mr-2" /> Novo
+                            </Button>
+                            <Button variant="outline" size="sm" disabled>
+                              <Edit2 className="w-4 h-4 mr-2" /> Editar
+                            </Button>
+                            <Button variant="outline" size="sm" disabled>
+                              <Trash2 className="w-4 h-4 mr-2" /> Excluir
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    );
                   }
 
                   return (
@@ -2427,11 +4160,11 @@ export default function App() {
                                   {topic === 'Bens e Direitos' ? (
                                     <div className="space-y-2">
                                       <div>
-                                        <p className="text-[10px] font-bold text-slate-400 uppercase">Situação em 31/12/2023</p>
-                                        <p className="text-lg font-bold text-slate-900">{formatCurrency(item.previous_value || 0)}</p>
+                                        <p className="text-[10px] font-bold text-slate-400 uppercase">Situação em 31/12/{calendarYear - 1}</p>
+                                        <p className="text-lg font-bold text-slate-900">{formatCurrency(item.previousValue || 0)}</p>
                                       </div>
                                       <div>
-                                        <p className="text-[10px] font-bold text-slate-400 uppercase">Situação em 31/12/2024</p>
+                                        <p className="text-[10px] font-bold text-slate-400 uppercase">Situação em 31/12/{calendarYear}</p>
                                         <p className="text-lg font-bold text-blue-600">{formatCurrency(item.value)}</p>
                                       </div>
                                     </div>
@@ -2454,22 +4187,238 @@ export default function App() {
                   );
                 })}
               </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </main>
+            </>
+          );
+        })()}
+      </motion.div>
+    )}
+  </AnimatePresence>
+</main>
     </>
   )}
 
   {/* Modals */}
+      <Modal 
+        isOpen={isIrpfModalOpen} 
+        onClose={() => setIsIrpfModalOpen(false)} 
+        title={selectedIrpfItem ? "Editar Item IRPF" : "Novo Item IRPF"}
+      >
+        <form onSubmit={(e) => {
+          e.preventDefault();
+          const newItem: any = {
+            id: selectedIrpfItem?.id || Date.now().toString(),
+            topic: irpfForm.topic,
+            group: irpfForm.group,
+            code: irpfForm.code,
+            description: irpfForm.description,
+            cnpj: irpfForm.cnpj,
+            value: irpfForm.value,
+            previousValue: irpfForm.previousValue,
+            year: irpfYear
+          };
+
+          setData(prev => {
+            const broker = prev.brokers.find(b => b.id === prev.currentBrokerId);
+            if (!broker) return prev;
+            
+            const existingItems = broker.irpfItems || [];
+            const updatedItems = selectedIrpfItem 
+              ? existingItems.map(item => item.id === selectedIrpfItem.id ? newItem : item)
+              : [...existingItems, newItem];
+              
+            return {
+              ...prev,
+              brokers: prev.brokers.map(b => b.id === prev.currentBrokerId ? { ...b, irpfItems: updatedItems } : b)
+            };
+          });
+          
+          setIsIrpfModalOpen(false);
+          showNotify(selectedIrpfItem ? 'Item atualizado!' : 'Item adicionado!');
+        }} className="space-y-4">
+          <div className="space-y-1">
+            <label className="text-xs font-bold text-slate-500 uppercase">Ticker do Ativo (Auto-preencher)</label>
+            <div className="relative">
+              <input 
+                type="text" 
+                placeholder="Ex: PETR4, ITUB4"
+                value={irpfForm.ticker}
+                onChange={(e) => handleIrpfTickerChange(e.target.value)}
+                className="w-full bg-blue-50/50 border border-blue-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 font-bold text-blue-700"
+              />
+              <Search className="w-4 h-4 absolute right-3 top-2.5 text-blue-400" />
+            </div>
+            <p className="text-[10px] text-blue-500 italic">Digite o código para preencher grupo, código, CNPJ e descrição automaticamente.</p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-500 uppercase">Tópico</label>
+              <select 
+                value={irpfForm.topic}
+                onChange={(e) => setIrpfForm(prev => ({ ...prev, topic: e.target.value }))}
+                className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+              >
+                <option value="Bens e Direitos">Bens e Direitos</option>
+                <option value="Rendimentos Isentos">Rendimentos Isentos</option>
+                <option value="Rendimentos Sujeitos à Tributação Exclusiva">Tributação Exclusiva</option>
+                <option value="Rendimentos Tributáveis">Rendimentos Tributáveis</option>
+                <option value="Imposto Retido na Fonte">Imposto Retido</option>
+                <option value="Rendimentos Recebidos Acumuladamente">Rendimentos Acumulados</option>
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-500 uppercase">CNPJ (Opcional)</label>
+              <input 
+                type="text" 
+                placeholder="00.000.000/0000-00"
+                value={irpfForm.cnpj}
+                onChange={(e) => setIrpfForm(prev => ({ ...prev, cnpj: e.target.value }))}
+                className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+              />
+            </div>
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-500 uppercase">Grupo (Bens)</label>
+              <input 
+                type="text" 
+                placeholder="Ex: 03"
+                value={irpfForm.group}
+                onChange={(e) => setIrpfForm(prev => ({ ...prev, group: e.target.value }))}
+                className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-500 uppercase">Código</label>
+              <input 
+                type="text" 
+                placeholder="Ex: 01"
+                required
+                value={irpfForm.code}
+                onChange={(e) => setIrpfForm(prev => ({ ...prev, code: e.target.value }))}
+                className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+              />
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-xs font-bold text-slate-500 uppercase">Discriminação</label>
+            <textarea 
+              rows={4}
+              required
+              value={irpfForm.description}
+              onChange={(e) => setIrpfForm(prev => ({ ...prev, description: e.target.value }))}
+              className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-500 uppercase">Situação Anterior</label>
+              <input 
+                type="number" 
+                step="0.01"
+                value={irpfForm.previousValue}
+                onChange={(e) => setIrpfForm(prev => ({ ...prev, previousValue: parseFloat(e.target.value) || 0 }))}
+                className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-500 uppercase">Situação Atual / Valor</label>
+              <input 
+                type="number" 
+                step="0.01"
+                required
+                value={irpfForm.value}
+                onChange={(e) => setIrpfForm(prev => ({ ...prev, value: parseFloat(e.target.value) || 0 }))}
+                className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+              />
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-2 pt-4">
+            <Button type="button" variant="outline" onClick={() => setIsIrpfModalOpen(false)}>Cancelar</Button>
+            <Button type="submit">Salvar Item</Button>
+          </div>
+        </form>
+      </Modal>
+
       <Modal isOpen={isCnpjModalOpen} onClose={() => setIsCnpjModalOpen(false)} title="Gerenciar CNPJs dos Ativos">
         <div className="space-y-6">
-          <p className="text-sm text-slate-500">Insira os CNPJs de todos os seus ativos para que apareçam corretamente nos relatórios de Bens e Direitos.</p>
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+            <p className="text-sm text-slate-500">Insira os CNPJs de todos os seus ativos para que apareçam corretamente nos relatórios de Bens e Direitos.</p>
+            <div className="flex flex-wrap gap-2 w-full sm:w-auto">
+              <Button 
+                variant="primary" 
+                size="sm" 
+                className="w-full sm:w-auto"
+                onClick={handleAutoFillCnpjs}
+                disabled={isAutoFillingCnpjs}
+              >
+                {isAutoFillingCnpjs ? (
+                  <div className="flex items-center gap-2">
+                    <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    <span>{Math.round(processingProgress)}%</span>
+                  </div>
+                ) : (
+                  <>
+                    <Search className="w-4 h-4 mr-2" /> Auto-preencher via IA
+                  </>
+                )}
+              </Button>
+              <input 
+                type="file" 
+                id="cnpj-pdf-upload" 
+                className="hidden" 
+                accept=".pdf" 
+                multiple
+                onChange={handleCnpjPdfUpload}
+                disabled={isProcessingPdf}
+              />
+              <Button 
+                variant="outline" 
+                size="sm" 
+                className="w-full sm:w-auto"
+                onClick={() => document.getElementById('cnpj-pdf-upload')?.click()}
+                disabled={isProcessingPdf}
+              >
+                {isProcessingPdf ? (
+                  <div className="flex flex-col items-center gap-1">
+                    <div className="flex items-center gap-2">
+                      <div className="w-3 h-3 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+                      <span>{Math.round(processingProgress)}%</span>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <Download className="w-4 h-4 mr-2" /> Importar de PDF
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
+          {(isAutoFillingCnpjs || isProcessingPdf) && (
+            <div className="p-4 bg-blue-50 border border-blue-100 rounded-xl space-y-2">
+              <div className="flex justify-between text-[10px] font-bold text-blue-600 uppercase">
+                <span>{processingStatus}</span>
+                <span>{Math.round(processingProgress)}%</span>
+              </div>
+              <div className="w-full bg-blue-200 rounded-full h-1.5 overflow-hidden">
+                <motion.div 
+                  className="bg-blue-600 h-full"
+                  initial={{ width: 0 }}
+                  animate={{ width: `${processingProgress}%` }}
+                  transition={{ duration: 0.3 }}
+                />
+              </div>
+            </div>
+          )}
           <div className="max-h-[60vh] overflow-y-auto border border-slate-200 rounded-lg">
             <table className="w-full text-left border-collapse">
               <thead className="sticky top-0 bg-slate-50 border-b border-slate-200 z-10">
                 <tr>
-                  <th className="px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Ativo</th>
+                  <th className="px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Ativo / Nome Social</th>
                   <th className="px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Código</th>
                   <th className="px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">CNPJ</th>
                 </tr>
@@ -2477,37 +4426,42 @@ export default function App() {
               <tbody className="divide-y divide-slate-100">
                 {currentBroker?.assets.map(asset => (
                   <tr key={asset.id} className="hover:bg-slate-50 transition-colors">
-                    <td className="px-4 py-3 text-sm font-medium text-slate-900">{asset.name}</td>
+                    <td className="px-4 py-3">
+                      <p className="text-sm font-medium text-slate-900">{asset.name}</p>
+                      <input 
+                        type="text"
+                        placeholder="Razão Social..."
+                        defaultValue={asset.corporateName || ''}
+                        onBlur={(e) => {
+                          const newName = e.target.value;
+                          if (newName === asset.corporateName) return;
+                          setData(prev => ({
+                            ...prev,
+                            brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
+                              ...b,
+                              assets: b.assets.map(a => a.id === asset.id ? { ...a, corporateName: newName } : a)
+                            } : b)
+                          }));
+                        }}
+                        className="w-full mt-1 px-2 py-1 text-[10px] border border-slate-100 rounded focus:outline-none focus:ring-1 focus:ring-blue-500/20"
+                      />
+                    </td>
                     <td className="px-4 py-3 text-sm font-mono text-slate-500">{asset.code}</td>
                     <td className="px-4 py-3">
                       <input 
                         type="text"
                         placeholder="00.000.000/0000-00"
                         defaultValue={asset.cnpj || ''}
-                        onBlur={async (e) => {
+                        onBlur={(e) => {
                           const newCnpj = e.target.value;
                           if (newCnpj === asset.cnpj) return;
-                          setSyncLoading(true);
-                          try {
-                            const { error } = await supabase
-                              .from('assets')
-                              .update({ cnpj: newCnpj })
-                              .eq('id', asset.id);
-                            if (error) throw error;
-
-                            setData(prev => ({
-                              ...prev,
-                              brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
-                                ...b,
-                                assets: b.assets.map(a => a.id === asset.id ? { ...a, cnpj: newCnpj } : a)
-                              } : b)
-                            }));
-                          } catch (err) {
-                            console.error(err);
-                            showNotify('Erro ao atualizar CNPJ', 'error');
-                          } finally {
-                            setSyncLoading(false);
-                          }
+                          setData(prev => ({
+                            ...prev,
+                            brokers: prev.brokers.map(b => b.id === currentBroker.id ? {
+                              ...b,
+                              assets: b.assets.map(a => a.id === asset.id ? { ...a, cnpj: newCnpj } : a)
+                            } : b)
+                          }));
                         }}
                         className="w-full px-3 py-1.5 text-sm border border-slate-200 rounded focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
                       />
@@ -2524,6 +4478,67 @@ export default function App() {
           </div>
           <div className="flex justify-end">
             <Button onClick={() => setIsCnpjModalOpen(false)}>Fechar</Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal 
+        isOpen={isTransactionHistoryOpen} 
+        onClose={() => setIsTransactionHistoryOpen(false)} 
+        title={`Histórico de Transações: ${selectedAssetForHistory?.code}`}
+      >
+        <div className="space-y-4">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="bg-slate-50 border-b border-slate-200">
+                  <th className="px-4 py-3 text-xs font-bold text-slate-500 uppercase">Data</th>
+                  <th className="px-4 py-3 text-xs font-bold text-slate-500 uppercase">Tipo</th>
+                  <th className="px-4 py-3 text-xs font-bold text-slate-500 uppercase text-right">Qtd</th>
+                  <th className="px-4 py-3 text-xs font-bold text-slate-500 uppercase text-right">Preço</th>
+                  <th className="px-4 py-3 text-xs font-bold text-slate-500 uppercase text-right">Total</th>
+                  <th className="px-4 py-3 text-xs font-bold text-slate-500 uppercase">Fonte</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {selectedAssetForHistory && uniqueTransactions
+                  .filter(t => {
+                    const asset = (currentBroker?.assets || []).find(a => a.id === t.assetId);
+                    return asset?.code.trim().toUpperCase() === selectedAssetForHistory.code.trim().toUpperCase();
+                  })
+                  .sort((a, b) => (b.date || '').localeCompare(a.date || ''))
+                  .map(t => (
+                    <tr key={t.id} className="hover:bg-slate-50">
+                      <td className="px-4 py-3 text-sm text-slate-600">
+                        {t.date && isValid(parseISO(t.date)) ? format(parseISO(t.date), 'dd/MM/yyyy') : '-'}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className={cn(
+                          "px-2 py-0.5 rounded text-[10px] font-bold uppercase",
+                          t.type === 'Compra' ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"
+                        )}>
+                          {t.type}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-right text-sm text-slate-700">{t.quantity.toLocaleString('pt-BR')}</td>
+                      <td className="px-4 py-3 text-right text-sm text-slate-600">{formatCurrency(t.price)}</td>
+                      <td className="px-4 py-3 text-right text-sm font-bold text-slate-900">{formatCurrency(t.quantity * t.price)}</td>
+                      <td className="px-4 py-3 text-[10px] text-slate-400 italic">{t.source || 'Manual'}</td>
+                    </tr>
+                  ))}
+                {(!selectedAssetForHistory || uniqueTransactions.filter(t => {
+                  const asset = (currentBroker?.assets || []).find(a => a.id === t.assetId);
+                  return asset?.code.trim().toUpperCase() === selectedAssetForHistory.code.trim().toUpperCase();
+                }).length === 0) && (
+                  <tr>
+                    <td colSpan={6} className="px-4 py-8 text-center text-slate-400 italic">Nenhuma transação encontrada para este ativo.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          <div className="flex justify-end">
+            <Button variant="secondary" onClick={() => setIsTransactionHistoryOpen(false)}>Fechar</Button>
           </div>
         </div>
       </Modal>
@@ -2547,10 +4562,14 @@ export default function App() {
             options={ASSET_TYPES.map(t => ({ label: t, value: t }))} 
             required 
           />
-          <Input name="name" label="Nome do Ativo" defaultValue={editingAsset?.name || ''} placeholder="Ex: Banco do Brasil S.A." required />
           <div className="grid grid-cols-2 gap-4">
             <Input name="code" label="Código (Ticker)" defaultValue={editingAsset?.code || ''} placeholder="Ex: BBAS3" required />
             <Input name="cnpj" label="CNPJ" defaultValue={editingAsset?.cnpj || ''} placeholder="00.000.000/0001-00" />
+          </div>
+          <Input name="corporateName" label="Nome Social / Razão Social" defaultValue={editingAsset?.corporateName || ''} placeholder="Ex: Banco do Brasil S.A." />
+          <div className="grid grid-cols-2 gap-4">
+            <Input name="name" label="Nome de Exibição" defaultValue={editingAsset?.name || ''} placeholder="Ex: Banco do Brasil" required />
+            <Input name="currentPrice" label="Preço Atual (R$)" type="number" step="0.01" defaultValue={editingAsset?.currentPrice || ''} placeholder="0,00" />
           </div>
         </form>
       </Modal>
@@ -2568,7 +4587,7 @@ export default function App() {
       >
         <form id="transaction-form" onSubmit={handleSaveTransaction} className="space-y-4">
           <Select 
-            name="asset_id" 
+            name="assetId" 
             label="Ativo" 
             options={currentBroker ? (currentBroker.assets || []).map(a => ({ label: `${a.code} - ${a.name}`, value: a.id })) : []} 
             required 
@@ -2584,6 +4603,7 @@ export default function App() {
             <Input name="quantity" label="Quantidade" type="number" step="0.0001" placeholder="0" required />
             <Input name="price" label="Preço Unitário" type="number" step="0.01" placeholder="0,00" required />
           </div>
+          <input type="hidden" name="source" value="Manual" />
         </form>
       </Modal>
 
@@ -2600,16 +4620,17 @@ export default function App() {
       >
         <form id="dividend-form" onSubmit={handleSaveDividend} className="space-y-4">
           <Select 
-            name="asset_id" 
+            name="assetId" 
             label="Ativo" 
             options={currentBroker ? (currentBroker.assets || []).map(a => ({ label: `${a.code} - ${a.name}`, value: a.id })) : []} 
             required 
           />
           <Input name="date" label="Data de Pagamento" type="date" defaultValue={format(new Date(), 'yyyy-MM-dd')} required />
           <div className="grid grid-cols-2 gap-4">
-            <Input name="dividend_value" label="Dividendos (R$)" type="number" step="0.01" placeholder="0,00" />
-            <Input name="jcp_value" label="JCP (R$)" type="number" step="0.01" placeholder="0,00" />
+            <Input name="dividendValue" label="Dividendos (R$)" type="number" step="0.01" placeholder="0,00" />
+            <Input name="jcpValue" label="JCP (R$)" type="number" step="0.01" placeholder="0,00" />
           </div>
+          <input type="hidden" name="source" value="Manual" />
         </form>
       </Modal>
 
@@ -2648,27 +4669,16 @@ export default function App() {
                       askConfirm(
                         'Excluir Corretora',
                         `Deseja realmente excluir a corretora ${b.name} e todos os seus dados? Esta ação não pode ser desfeita.`,
-                        async () => {
-                          setSyncLoading(true);
-                          try {
-                            const { error } = await supabase.from('brokers').delete().eq('id', b.id);
-                            if (error) throw error;
-
-                            setData(prev => {
-                              const newBrokers = prev.brokers.filter(br => br.id !== b.id);
-                              return {
-                                ...prev,
-                                brokers: newBrokers,
-                                currentBrokerId: b.id === prev.currentBrokerId ? (newBrokers[0]?.id || null) : prev.currentBrokerId
-                              };
-                            });
-                            showNotify('Corretora removida');
-                          } catch (err) {
-                            console.error(err);
-                            showNotify('Erro ao remover corretora', 'error');
-                          } finally {
-                            setSyncLoading(false);
-                          }
+                        () => {
+                          setData(prev => {
+                            const newBrokers = prev.brokers.filter(br => br.id !== b.id);
+                            return {
+                              ...prev,
+                              brokers: newBrokers,
+                              currentBrokerId: b.id === prev.currentBrokerId ? (newBrokers[0]?.id || null) : prev.currentBrokerId
+                            };
+                          });
+                          showNotify('Corretora removida');
                         }
                       );
                     }}
@@ -2701,6 +4711,7 @@ export default function App() {
             <input 
               type="file" 
               accept=".pdf" 
+              multiple
               onChange={handleIrpfPdfUpload}
               disabled={isProcessingPdf}
               className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
@@ -2710,18 +4721,43 @@ export default function App() {
               isProcessingPdf ? "bg-slate-50 border-slate-200" : "bg-white border-emerald-200 hover:border-emerald-400 hover:bg-emerald-50"
             )}>
               {isProcessingPdf ? (
-                <div className="flex flex-col items-center gap-3">
-                  <div className="w-8 h-8 border-4 border-emerald-600 border-t-transparent rounded-full animate-spin" />
-                  <p className="text-sm font-bold text-emerald-700">Processando Informe...</p>
-                  <p className="text-xs text-slate-500 italic">Isso pode levar alguns segundos enquanto a IA analisa o documento.</p>
+                <div className="flex flex-col items-center gap-4">
+                  <div className="relative w-16 h-16">
+                    <svg className="w-full h-full" viewBox="0 0 36 36">
+                      <path
+                        className="text-slate-200"
+                        strokeDasharray="100, 100"
+                        d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="3"
+                      />
+                      <motion.path
+                        className="text-emerald-600"
+                        strokeDasharray={`${processingProgress}, 100`}
+                        d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="3"
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <span className="text-xs font-bold text-emerald-700">{Math.round(processingProgress)}%</span>
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm font-bold text-emerald-700">{processingStatus}</p>
+                    <p className="text-[10px] text-slate-500 italic">Aguarde enquanto a IA processa seus documentos...</p>
+                  </div>
                 </div>
               ) : (
                 <div className="flex flex-col items-center gap-3">
                   <div className="w-12 h-12 bg-emerald-100 rounded-full flex items-center justify-center">
                     <Download className="w-6 h-6 text-emerald-600" />
                   </div>
-                  <p className="text-sm font-bold text-slate-700">Clique ou arraste o PDF aqui</p>
-                  <p className="text-xs text-slate-500">Apenas arquivos .pdf são suportados</p>
+                  <p className="text-sm font-bold text-slate-700">Clique ou arraste os PDFs aqui</p>
+                  <p className="text-xs text-slate-500">Você pode selecionar vários arquivos de uma vez</p>
                 </div>
               )}
             </div>
@@ -2747,6 +4783,7 @@ export default function App() {
             <input 
               type="file" 
               accept="application/pdf" 
+              multiple
               onChange={handlePdfUpload}
               disabled={isProcessingPdf}
               className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-not-allowed"
@@ -2756,20 +4793,353 @@ export default function App() {
               isProcessingPdf ? "bg-slate-50 border-slate-200" : "bg-white border-slate-200 hover:border-blue-400 hover:bg-blue-50/30"
             )}>
               {isProcessingPdf ? (
-                <div className="space-y-4">
-                  <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto" />
-                  <p className="text-sm font-bold text-slate-600 animate-pulse">Processando nota com IA...</p>
+                <div className="flex flex-col items-center gap-4">
+                  <div className="relative w-16 h-16">
+                    <svg className="w-full h-full" viewBox="0 0 36 36">
+                      <path
+                        className="text-slate-200"
+                        strokeDasharray="100, 100"
+                        d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="3"
+                      />
+                      <motion.path
+                        className="text-blue-600"
+                        strokeDasharray={`${processingProgress}, 100`}
+                        d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="3"
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <span className="text-xs font-bold text-blue-700">{Math.round(processingProgress)}%</span>
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm font-bold text-blue-700">{processingStatus}</p>
+                    <p className="text-[10px] text-slate-500 italic">Extraindo operações com inteligência artificial...</p>
+                  </div>
                 </div>
               ) : (
                 <div className="space-y-2">
                   <div className="w-12 h-12 bg-slate-100 rounded-xl flex items-center justify-center mx-auto mb-2">
                     <Download className="w-6 h-6 text-slate-400" />
                   </div>
-                  <p className="text-sm font-bold text-slate-700">Clique ou arraste o PDF aqui</p>
+                  <p className="text-sm font-bold text-slate-700">Clique ou arraste os PDFs aqui</p>
                   <p className="text-xs text-slate-500">Suporta notas da XP, Rico, Clear, BTG, etc.</p>
                 </div>
               )}
             </div>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal 
+        isOpen={isSettingsModalOpen} 
+        onClose={() => setIsSettingsModalOpen(false)} 
+        title="Configurações de IA"
+        footer={
+          <Button onClick={() => setIsSettingsModalOpen(false)} className="w-full">Fechar</Button>
+        }
+      >
+        <div className="space-y-6">
+          <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 flex gap-4">
+            <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center shrink-0">
+              <Info className="w-5 h-5 text-blue-600" />
+            </div>
+            <div className="space-y-1">
+              <p className="text-sm font-bold text-blue-900">Sobre a Inteligência Artificial</p>
+              <p className="text-xs text-blue-800 leading-relaxed">
+                Este aplicativo utiliza a IA do Google Gemini para extrair dados de PDFs e analisar seu portfólio. 
+                Se você estiver vendo o erro "Spending Cap", significa que o limite de gastos da sua conta Google Cloud foi atingido. 
+                Você pode aumentar esse limite no console do Google Cloud ou usar uma chave de API gratuita do Google AI Studio.
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Sua Chave de API Gemini</label>
+              <div className="relative">
+                <input 
+                  type="password" 
+                  value={userApiKey}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setUserApiKey(val);
+                    localStorage.setItem('USER_GEMINI_API_KEY', val);
+                  }}
+                  placeholder="Insira sua chave API aqui..."
+                  className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                />
+              </div>
+              <p className="text-[10px] text-slate-400 italic">
+                Sua chave é salva apenas no seu navegador (localStorage) e nunca é enviada para nossos servidores.
+              </p>
+            </div>
+
+            <div className="pt-4 border-t border-slate-100 space-y-4">
+              <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider">Manutenção de Dados</h3>
+              <div className="p-4 bg-slate-50 border border-slate-100 rounded-xl space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-blue-100 text-blue-600">
+                      <ArrowLeftRight className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold text-slate-900">Consolidar Ativos e Transações</p>
+                      <p className="text-[10px] text-slate-500">Mescla ativos duplicados e remove duplicatas.</p>
+                    </div>
+                  </div>
+                  <Button 
+                    variant="outline" 
+                    size="sm"
+                    onClick={handleConsolidateData}
+                  >
+                    Consolidar
+                  </Button>
+                </div>
+              </div>
+            </div>
+
+            <div className="pt-4 border-t border-slate-100 space-y-4">
+              <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider">Segurança e Privacidade</h3>
+              <div className="p-4 bg-slate-50 border border-slate-100 rounded-xl space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className={cn(
+                      "w-8 h-8 rounded-lg flex items-center justify-center",
+                      data.isEncrypted ? "bg-emerald-100 text-emerald-600" : "bg-slate-200 text-slate-500"
+                    )}>
+                      <ShieldCheck className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold text-slate-900">Criptografia de Dados</p>
+                      <p className="text-[10px] text-slate-500">{data.isEncrypted ? 'Ativada' : 'Desativada'}</p>
+                    </div>
+                  </div>
+                  <Button 
+                    variant={data.isEncrypted ? "outline" : "primary"} 
+                    size="sm"
+                    onClick={() => setIsSettingPassword(true)}
+                  >
+                    {data.isEncrypted ? 'Alterar Senha' : 'Ativar'}
+                  </Button>
+                </div>
+                {data.isEncrypted && (
+                  <Button 
+                    variant="ghost" 
+                    size="sm" 
+                    className="w-full text-red-500 hover:bg-red-50"
+                    onClick={() => handleSetPassword('')}
+                  >
+                    Desativar Criptografia
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            <div className="pt-4 border-t border-slate-100">
+              <a 
+                href="https://aistudio.google.com/app/apikey" 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="text-xs text-blue-600 hover:underline flex items-center gap-1"
+              >
+                Como obter uma chave gratuita? <ArrowLeftRight className="w-3 h-3 rotate-45" />
+              </a>
+            </div>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal 
+        isOpen={isSettingPassword} 
+        onClose={() => setIsSettingPassword(false)} 
+        title={data.isEncrypted ? "Alterar Senha Mestre" : "Ativar Criptografia"}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setIsSettingPassword(false)}>Cancelar</Button>
+            <Button type="submit" form="password-form">Salvar Senha</Button>
+          </>
+        }
+      >
+        <form 
+          id="password-form" 
+          onSubmit={(e) => {
+            e.preventDefault();
+            const pwd = (e.currentTarget.elements.namedItem('new-password') as HTMLInputElement).value;
+            const confirm = (e.currentTarget.elements.namedItem('confirm-password') as HTMLInputElement).value;
+            if (pwd !== confirm) {
+              showNotify('As senhas não coincidem!', 'error');
+              return;
+            }
+            handleSetPassword(pwd);
+          }}
+          className="space-y-4"
+        >
+          <div className="p-4 bg-amber-50 border border-amber-100 rounded-xl flex gap-3">
+            <AlertCircle className="w-5 h-5 text-amber-600 shrink-0" />
+            <p className="text-xs text-amber-800 leading-relaxed">
+              <b>Importante:</b> Esta senha será necessária toda vez que você abrir o aplicativo. 
+              Se você perdê-la, seus dados ficarão inacessíveis permanentemente.
+            </p>
+          </div>
+          <Input name="new-password" type="password" label="Nova Senha Mestre" placeholder="Mínimo 6 caracteres" required minLength={6} />
+          <Input name="confirm-password" type="password" label="Confirmar Senha" placeholder="Repita a senha" required minLength={6} />
+        </form>
+      </Modal>
+
+      <Modal 
+        isOpen={isChangelogModalOpen} 
+        onClose={() => setIsChangelogModalOpen(false)} 
+        title="Histórico de Versões"
+        footer={
+          <Button onClick={() => setIsChangelogModalOpen(false)} className="w-full">Fechar</Button>
+        }
+      >
+        <div className="space-y-6">
+          <div className="p-4 bg-blue-50 border border-blue-100 rounded-xl">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
+                <Info className="w-4 h-4 text-white" />
+              </div>
+              <div>
+                <p className="text-sm font-bold text-blue-900">Versão Atual: v{APP_VERSION}</p>
+                <p className="text-[10px] text-blue-700">Acompanhe as atualizações do sistema.</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-6 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
+            {APP_CHANGELOG.map((entry, idx) => (
+              <div key={entry.version} className="relative pl-6 border-l-2 border-slate-100 last:border-0 pb-6 last:pb-0">
+                <div className="absolute left-[-9px] top-0 w-4 h-4 bg-white border-2 border-blue-500 rounded-full" />
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-sm font-bold text-slate-900">v{entry.version}</span>
+                  <span className="text-[10px] text-slate-400 font-medium">
+                    {entry.date && isValid(parseISO(entry.date)) ? format(parseISO(entry.date), 'dd/MM/yyyy') : '-'}
+                  </span>
+                </div>
+                <ul className="space-y-1.5">
+                  {entry.changes.map((change, cIdx) => (
+                    <li key={cIdx} className="text-xs text-slate-600 flex items-start gap-2">
+                      <div className="w-1 h-1 bg-slate-300 rounded-full mt-1.5 shrink-0" />
+                      {change}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </div>
+      </Modal>
+
+      <Modal 
+        isOpen={isSnapshotModalOpen} 
+        onClose={() => setIsSnapshotModalOpen(false)} 
+        title="Versões e Pontos de Restauração"
+        footer={
+          <Button onClick={() => setIsSnapshotModalOpen(false)} className="w-full">Fechar</Button>
+        }
+      >
+        <div className="space-y-6">
+          <div className="flex justify-between items-center">
+            <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider">Histórico de Versões</h3>
+            <Button size="sm" onClick={() => handleCreateSnapshot()}>
+              <Plus className="w-4 h-4 mr-2" /> Criar Ponto
+            </Button>
+          </div>
+
+          <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
+            {(!data.snapshots || data.snapshots.length === 0) ? (
+              <div className="text-center py-8 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                <p className="text-sm text-slate-400 italic">Nenhum ponto de restauração criado.</p>
+              </div>
+            ) : (
+              data.snapshots.map(snapshot => (
+                <div key={snapshot.id} className="p-4 bg-white border border-slate-200 rounded-xl hover:border-blue-300 transition-colors group">
+                  <div className="flex justify-between items-start mb-2">
+                    <div>
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="px-1.5 py-0.5 bg-blue-100 text-blue-600 rounded text-[10px] font-mono font-bold">v{snapshot.version}</span>
+                        <p className="text-sm font-bold text-slate-800">{snapshot.label}</p>
+                      </div>
+                      <p className="text-[10px] text-slate-400 flex items-center gap-1">
+                        <TrendingUp className="w-3 h-3" /> {snapshot.date && isValid(parseISO(snapshot.date)) ? format(parseISO(snapshot.date), 'dd/MM/yyyy HH:mm') : '-'}
+                      </p>
+                    </div>
+                    <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <Button variant="ghost" size="sm" onClick={() => handleRestoreSnapshot(snapshot)} className="text-blue-600">
+                        <ArrowLeftRight className="w-4 h-4" />
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={() => handleDeleteSnapshot(snapshot.id)} className="text-red-500">
+                        <Trash2 className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="flex gap-4 text-[10px] text-slate-500">
+                    <p><b>{snapshot.data.length}</b> Corretoras</p>
+                    <p><b>{snapshot.data.reduce((acc, b) => {
+                      const uniqueCodes = new Set((b.assets || []).map(a => a.code.trim().toUpperCase()));
+                      return acc + uniqueCodes.size;
+                    }, 0)}</b> Ativos</p>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+
+          <div className="pt-4 border-t border-slate-100 space-y-4">
+            <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider">Backup Externo</h3>
+            <div className="grid grid-cols-2 gap-3">
+              <Button variant="outline" size="sm" onClick={handleFullBackup}>
+                <Download className="w-4 h-4 mr-2" /> Exportar Tudo
+              </Button>
+              <div className="relative">
+                <input 
+                  type="file" 
+                  accept=".json" 
+                  onChange={handleImportBackup}
+                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                />
+                <Button variant="outline" size="sm" className="w-full">
+                  <ArrowLeftRight className="w-4 h-4 mr-2" /> Importar Backup
+                </Button>
+              </div>
+            </div>
+            <div className="p-3 bg-amber-50 border border-amber-100 rounded-lg">
+              <p className="text-[10px] text-amber-800 leading-relaxed">
+                <b>Dica:</b> Use o backup externo para salvar seus dados fora do navegador. Recomendamos fazer o download pelo menos uma vez por mês ou antes de limpar o histórico do navegador.
+              </p>
+            </div>
+          </div>
+
+          <div className="pt-4 border-t border-slate-100">
+            <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">O que há de novo?</h4>
+            <div className="space-y-4">
+              {APP_CHANGELOG.map(item => (
+                <div key={item.version} className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-slate-700">v{item.version}</span>
+                    <span className="text-[10px] text-slate-400">{item.date}</span>
+                  </div>
+                  <ul className="list-disc list-inside space-y-0.5">
+                    {item.changes.map((change, idx) => (
+                      <li key={idx} className="text-[10px] text-slate-500 leading-relaxed">{change}</li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="pt-4 text-center">
+            <p className="text-[9px] text-slate-300 font-medium tracking-wider uppercase">
+              Produzido por Lino Botelho de Souza &copy; 2026
+            </p>
           </div>
         </div>
       </Modal>
@@ -2781,13 +5151,23 @@ export default function App() {
         footer={
           <>
             <Button variant="ghost" onClick={() => setConfirmModal(prev => ({ ...prev, isOpen: false }))}>Cancelar</Button>
-            <Button variant="danger" onClick={confirmModal.onConfirm}>Confirmar Exclusão</Button>
+            <Button variant={confirmModal.variant || 'danger'} onClick={confirmModal.onConfirm}>
+              {confirmModal.confirmText || 'Confirmar'}
+            </Button>
           </>
         }
       >
         <div className="flex items-center gap-4">
-          <div className="w-12 h-12 bg-red-50 rounded-full flex items-center justify-center shrink-0">
-            <AlertCircle className="w-6 h-6 text-red-500" />
+          <div className={cn(
+            "w-12 h-12 rounded-full flex items-center justify-center shrink-0",
+            confirmModal.variant === 'primary' ? "bg-blue-50" : 
+            confirmModal.variant === 'success' ? "bg-emerald-50" : "bg-red-50"
+          )}>
+            <AlertCircle className={cn(
+              "w-6 h-6",
+              confirmModal.variant === 'primary' ? "text-blue-500" : 
+              confirmModal.variant === 'success' ? "text-emerald-500" : "text-red-500"
+            )} />
           </div>
           <p className="text-slate-600">{confirmModal.message}</p>
         </div>

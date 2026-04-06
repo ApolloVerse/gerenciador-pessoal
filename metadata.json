@@ -1,5 +1,5 @@
 {
-  "name": "Gerenciador de IR",
-  "description": "Gerenciador completo para controle de investimentos, preço médio e relatórios consolidados para Imposto de Renda com suporte a impressão e exportação.",
+  "name": "Investidor Inteligente B3",
+  "description": "Plataforma completa para gestão de investimentos na B3 com importação inteligente de PDFs via IA, consolidação automática de dados e Relatório IRPF integrado no padrão da Receita Federal.",
   "requestFramePermissions": []
 }

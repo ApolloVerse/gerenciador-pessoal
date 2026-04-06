@@ -1,20 +1,29 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# Gerenciador de Investimentos e IR
 
-# Run and deploy your AI Studio app
+Aplicativo para gestão de ativos financeiros e auxílio na declaração de Imposto de Renda.
 
-This contains everything you need to run your app locally.
+## Como implantar no GitHub Pages
 
-View your app in AI Studio: https://ai.studio/apps/4f8c33b6-e19f-48df-a863-d70c1a8d735a
+Este projeto está configurado para ser implantado automaticamente no GitHub Pages usando GitHub Actions.
 
-## Run Locally
+### Passos para implantação:
 
-**Prerequisites:**  Node.js
+1.  **Crie um repositório no GitHub** e envie seu código para lá.
+2.  **Habilite o GitHub Pages**:
+    -   Vá em **Settings** > **Pages**.
+    -   Em **Build and deployment** > **Source**, selecione **GitHub Actions**.
+3.  **Configuração da IA**:
+    -   Como o GitHub Pages é um ambiente estático, você precisará inserir sua própria **Chave de API do Gemini** nas configurações do aplicativo (ícone de engrenagem/IA no cabeçalho).
+    -   Sua chave será salva localmente no seu navegador e não será exposta publicamente.
+4.  **Sistema de Versões e Snapshots**:
+    -   O aplicativo agora possui um sistema de **Pontos de Restauração (Snapshots)**.
+    -   Sempre que o sistema for atualizado, você verá a nova versão no cabeçalho.
+    -   Você pode criar pontos de restauração manuais dos seus dados. Se algo mudar no comportamento do sistema e você quiser voltar seus dados para um estado anterior, basta usar a função de restauração no menu de **Versões**.
 
+## Funcionalidades
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+-   Gestão de múltiplas corretoras.
+-   Importação de Notas de Corretagem e Informes de Rendimentos via PDF (usando IA).
+-   Cálculo automático de preço médio e patrimônio.
+-   Relatório detalhado para preenchimento do IRPF (Bens e Direitos, Rendimentos Isentos, etc.).
+-   Gráficos de alocação e dividendos.
