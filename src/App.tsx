@@ -431,17 +431,21 @@ export default function App() {
 
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
-  const [filterYear, setFilterYear] = useState<string>('all');
-  const [filterMonth, setFilterMonth] = useState<string>('all');
-  const [filterDay, setFilterDay] = useState<string>('all');
-  const [filterType, setFilterType] = useState<string>('all');
-  const [filterSource, setFilterSource] = useState<string>('all');
+  const [transactionFilterYear, setTransactionFilterYear] = useState<string>('all');
+  const [transactionFilterMonth, setTransactionFilterMonth] = useState<string>('all');
+  const [transactionFilterDay, setTransactionFilterDay] = useState<string>('all');
+  const [transactionFilterType, setTransactionFilterType] = useState<string>('all');
+  const [transactionFilterSource, setTransactionFilterSource] = useState<string>('all');
+  const [transactionFilterBroker, setTransactionFilterBroker] = useState<string>('all');
+  const [transactionFilterAsset, setTransactionFilterAsset] = useState<string>('all');
+  const [dividendFilterBroker, setDividendFilterBroker] = useState<string>('all');
   const [dividendFilterAsset, setDividendFilterAsset] = useState<string>('all');
   const [dividendFilterType, setDividendFilterType] = useState<string>('all');
   const [dividendFilterYear, setDividendFilterYear] = useState<string>('all');
   const [dividendFilterMonth, setDividendFilterMonth] = useState<string>('all');
   const [reportSearchTerm, setReportSearchTerm] = useState('');
   const [reportFilterType, setReportFilterType] = useState<string>('all');
+  const [irpfFilterBroker, setIrpfFilterBroker] = useState<string>('all');
   const [irpfFilterTopic, setIrpfFilterTopic] = useState<string>('all');
   const [irpfYear, setIrpfYear] = useState<string>((new Date().getFullYear() - 1).toString());
   const [sortField, setSortField] = useState<string>('code');
@@ -489,7 +493,7 @@ export default function App() {
       
       let description = irpfForm.description;
       if (irpfForm.topic === 'Bens e Direitos') {
-        description = getBensEDireitosDescription(asset, stats, calendarYear);
+        description = getBensEDireitosDescription(asset, stats, calendarYear, currentBroker);
       }
       
       setIrpfForm(prev => ({
@@ -511,10 +515,11 @@ export default function App() {
 
   useEffect(() => {
     setSearchTerm('');
-    setFilterYear('all');
-    setFilterMonth('all');
-    setFilterDay('all');
-    setFilterType('all');
+    setTransactionFilterYear('all');
+    setTransactionFilterMonth('all');
+    setTransactionFilterDay('all');
+    setTransactionFilterType('all');
+    setTransactionFilterSource('all');
     setDividendFilterAsset('all');
     setDividendFilterType('all');
     setDividendFilterYear('all');
@@ -568,109 +573,115 @@ export default function App() {
   // --- Calculations ---
 
   const uniqueTransactions = useMemo(() => {
-    if (!currentBroker) return [];
-    const assetIdToCode = new Map<string, string>();
-    (currentBroker.assets || []).forEach(a => assetIdToCode.set(a.id, a.code.trim().toUpperCase()));
-
-    const seen = new Map<string, Transaction>();
-    const unique: Transaction[] = [];
+    const allTransactions: (Transaction & { brokerName: string; brokerId: string })[] = [];
     
-    [...(currentBroker.transactions || [])]
-      .sort((a, b) => {
-        const dateCompare = (a.date || '').localeCompare(b.date || '');
-        if (dateCompare !== 0) return dateCompare;
-        
-        // Prioritize Nota de Corretagem over Informe de Rendimentos for the same day
-        const sourcePriority: Record<string, number> = {
-          'Nota de Corretagem': 1,
-          'Manual': 2,
-          'Extrato de Custódia': 3,
-          'Informe de Rendimentos': 4
-        };
-        const aPrio = sourcePriority[a.source as string] || 5;
-        const bPrio = sourcePriority[b.source as string] || 5;
-        if (aPrio !== bPrio) return aPrio - bPrio;
+    data.brokers.forEach(broker => {
+      const assetIdToCode = new Map<string, string>();
+      (broker.assets || []).forEach(a => assetIdToCode.set(a.id, a.code.trim().toUpperCase()));
 
-        // Same day, same source: Compra before Venda to ensure correct avgPrice calculation
-        if (a.type === 'Compra' && b.type === 'Venda') return -1;
-        if (a.type === 'Venda' && b.type === 'Compra') return 1;
-        return 0;
-      })
-      .forEach(t => {
-        const code = assetIdToCode.get(t.assetId) || 'UNKNOWN';
-        const date = (t.date || '').split('T')[0];
-        const qty = Math.abs(t.quantity || 0).toFixed(4);
-        const type = t.type;
-        
-        // Key for potential duplicates (same asset, date, type, quantity)
-        const key = `${code}-${date}-${type}-${qty}`;
-        
-        const existing = seen.get(key);
-        if (existing) {
-          const sourcePriority: Record<string, number> = { 'Nota de Corretagem': 1, 'Manual': 2, 'Extrato de Custódia': 3, 'Informe de Rendimentos': 4 };
-          const existingPrio = sourcePriority[existing.source as string] || 5;
-          const currentPrio = sourcePriority[t.source as string] || 5;
+      const seen = new Map<string, Transaction>();
+      const unique: Transaction[] = [];
+      
+      [...(broker.transactions || [])]
+        .sort((a, b) => {
+          const dateCompare = (a.date || '').localeCompare(b.date || '');
+          if (dateCompare !== 0) return dateCompare;
           
-          // If current is less reliable, skip it
-          if (currentPrio >= existingPrio) return;
+          const sourcePriority: Record<string, number> = {
+            'Nota de Corretagem': 1,
+            'Manual': 2,
+            'Extrato de Custódia': 3,
+            'Informe de Rendimentos': 4
+          };
+          const aPrio = sourcePriority[a.source as string] || 5;
+          const bPrio = sourcePriority[b.source as string] || 5;
+          if (aPrio !== bPrio) return aPrio - bPrio;
+
+          if (a.type === 'Compra' && b.type === 'Venda') return -1;
+          if (a.type === 'Venda' && b.type === 'Compra') return 1;
+          return 0;
+        })
+        .forEach(t => {
+          const code = assetIdToCode.get(t.assetId) || 'UNKNOWN';
+          const date = (t.date || '').split('T')[0];
+          const qty = Math.abs(t.quantity || 0).toFixed(4);
+          const type = t.type;
           
-          // If current is more reliable, remove existing from unique
-          const idx = unique.indexOf(existing);
-          if (idx !== -1) unique.splice(idx, 1);
-        }
-        
-        seen.set(key, t);
-        unique.push(t);
-      });
-    return unique;
-  }, [currentBroker]);
+          const key = `${code}-${date}-${type}-${qty}`;
+          
+          const existing = seen.get(key);
+          if (existing) {
+            const sourcePriority: Record<string, number> = { 'Nota de Corretagem': 1, 'Manual': 2, 'Extrato de Custódia': 3, 'Informe de Rendimentos': 4 };
+            const existingPrio = sourcePriority[existing.source as string] || 5;
+            const currentPrio = sourcePriority[t.source as string] || 5;
+            
+            if (currentPrio >= existingPrio) return;
+            
+            const idx = unique.indexOf(existing);
+            if (idx !== -1) unique.splice(idx, 1);
+          }
+          
+          seen.set(key, t);
+          unique.push(t);
+        });
+      
+      unique.forEach(t => allTransactions.push({ ...t, brokerName: broker.name, brokerId: broker.id }));
+    });
+    
+    return allTransactions;
+  }, [data.brokers]);
 
   const uniqueDividends = useMemo(() => {
-    if (!currentBroker) return [];
-    const assetIdToCode = new Map<string, string>();
-    (currentBroker.assets || []).forEach(a => assetIdToCode.set(a.id, a.code.trim().toUpperCase()));
-
-    const seen = new Map<string, Dividend>();
-    const unique: Dividend[] = [];
+    const allDividends: (Dividend & { brokerName: string; brokerId: string })[] = [];
     
-    [...(currentBroker.dividends || [])]
-      .sort((a, b) => {
-        const dateCompare = (a.date || '').localeCompare(b.date || '');
-        if (dateCompare !== 0) return dateCompare;
-        
-        const sourcePriority: Record<string, number> = { 'Manual': 1, 'Extrato de Custódia': 2, 'Informe de Rendimentos': 3 };
-        const aPrio = sourcePriority[a.source as string] || 4;
-        const bPrio = sourcePriority[b.source as string] || 4;
-        return aPrio - bPrio;
-      })
-      .forEach(d => {
-        const code = assetIdToCode.get(d.assetId) || 'UNKNOWN';
-        const date = (d.date || '').split('T')[0];
-        const val = (d.dividendValue || 0).toFixed(2);
-        const jcp = (d.jcpValue || 0).toFixed(2);
-        
-        const key = `${code}-${date}-${val}-${jcp}`;
-        
-        const existing = seen.get(key);
-        if (existing) {
+    data.brokers.forEach(broker => {
+      const assetIdToCode = new Map<string, string>();
+      (broker.assets || []).forEach(a => assetIdToCode.set(a.id, a.code.trim().toUpperCase()));
+
+      const seen = new Map<string, Dividend>();
+      const unique: Dividend[] = [];
+      
+      [...(broker.dividends || [])]
+        .sort((a, b) => {
+          const dateCompare = (a.date || '').localeCompare(b.date || '');
+          if (dateCompare !== 0) return dateCompare;
+          
           const sourcePriority: Record<string, number> = { 'Manual': 1, 'Extrato de Custódia': 2, 'Informe de Rendimentos': 3 };
-          const existingPrio = sourcePriority[existing.source as string] || 4;
-          const currentPrio = sourcePriority[d.source as string] || 4;
+          const aPrio = sourcePriority[a.source as string] || 4;
+          const bPrio = sourcePriority[b.source as string] || 4;
+          return aPrio - bPrio;
+        })
+        .forEach(d => {
+          const code = assetIdToCode.get(d.assetId) || 'UNKNOWN';
+          const date = (d.date || '').split('T')[0];
+          const val = (d.dividendValue || 0).toFixed(2);
+          const jcp = (d.jcpValue || 0).toFixed(2);
           
-          if (currentPrio >= existingPrio) return;
+          const key = `${code}-${date}-${val}-${jcp}`;
           
-          const idx = unique.indexOf(existing);
-          if (idx !== -1) unique.splice(idx, 1);
-        }
-        
-        seen.set(key, d);
-        unique.push(d);
-      });
-    return unique;
-  }, [currentBroker]);
+          const existing = seen.get(key);
+          if (existing) {
+            const sourcePriority: Record<string, number> = { 'Manual': 1, 'Extrato de Custódia': 2, 'Informe de Rendimentos': 3 };
+            const existingPrio = sourcePriority[existing.source as string] || 4;
+            const currentPrio = sourcePriority[d.source as string] || 4;
+            
+            if (currentPrio >= existingPrio) return;
+            
+            const idx = unique.indexOf(existing);
+            if (idx !== -1) unique.splice(idx, 1);
+          }
+          
+          seen.set(key, d);
+          unique.push(d);
+        });
+      
+      unique.forEach(d => allDividends.push({ ...d, brokerName: broker.name, brokerId: broker.id }));
+    });
+    
+    return allDividends;
+  }, [data.brokers]);
 
   const assetStats = useMemo(() => {
-    if (!currentBroker) return {};
     const stats: Record<string, { 
       quantity: number; 
       totalInvested: number; 
@@ -692,228 +703,238 @@ export default function App() {
     const currentYearEnd = `${calendarYear}-12-31`;
     const previousYearEnd = `${previousYear}-12-31`;
 
-    const assetsByCode: Record<string, Asset[]> = {};
-    (currentBroker.assets || []).forEach(a => {
-      const code = a.code.trim().toUpperCase();
-      if (!assetsByCode[code]) assetsByCode[code] = [];
-      assetsByCode[code].push(a);
-    });
-
-    const assetIdToCode = new Map<string, string>();
-    (currentBroker.assets || []).forEach(a => assetIdToCode.set(a.id, a.code.trim().toUpperCase()));
-
-    Object.values(assetsByCode).forEach(assetsWithThisCode => {
-      const firstAsset = assetsWithThisCode[0];
-      const code = firstAsset.code.trim().toUpperCase();
-      
-      const transactions = uniqueTransactions
-        .filter(t => {
-          const tCode = assetIdToCode.get(t.assetId);
-          return tCode === code;
-        })
-        .sort((a, b) => {
-          const dateCompare = (a.date || '').localeCompare(b.date || '');
-          if (dateCompare !== 0) return dateCompare;
-          if (a.type === 'Compra' && b.type === 'Venda') return -1;
-          if (a.type === 'Venda' && b.type === 'Compra') return 1;
-          return 0;
-        });
-
-      let quantity = 0;
-      let totalInvested = 0;
-      let avgPrice = 0;
-      let boughtQuantity = 0;
-      let soldQuantity = 0;
-      let quantityCurrentYear = 0;
-      let totalInvestedCurrentYear = 0;
-      let quantityPreviousYear = 0;
-      let totalInvestedPreviousYear = 0;
-
-      transactions.forEach(t => {
-        const absQty = Math.abs(t.quantity || 0);
-        const price = t.price || 0;
-        
-        if (t.type === 'Compra') {
-          boughtQuantity += absQty;
-          const newQuantity = quantity + absQty;
-          const newTotalInvested = totalInvested + (absQty * price);
-          quantity = newQuantity;
-          totalInvested = newTotalInvested;
-          avgPrice = quantity > 0 ? totalInvested / quantity : 0;
-        } else {
-          soldQuantity += absQty;
-          if (quantity > 0) {
-            const ratio = (quantity - absQty) / quantity;
-            quantity = Math.max(0, quantity - absQty);
-            totalInvested = quantity > 0 ? totalInvested * ratio : 0;
-          } else {
-            quantity = 0;
-            totalInvested = 0;
-            avgPrice = 0;
-          }
-        }
-
-        if (t.date && t.date <= previousYearEnd) {
-          quantityPreviousYear = quantity;
-          totalInvestedPreviousYear = totalInvested;
-        }
-        if (t.date && t.date <= currentYearEnd) {
-          quantityCurrentYear = quantity;
-          totalInvestedCurrentYear = totalInvested;
-        }
+    data.brokers.forEach(broker => {
+      const assetsByCode: Record<string, Asset[]> = {};
+      (broker.assets || []).forEach(a => {
+        const code = a.code.trim().toUpperCase();
+        if (!assetsByCode[code]) assetsByCode[code] = [];
+        assetsByCode[code].push(a);
       });
 
-      const currentPrice = firstAsset.currentPrice || 0;
-      const currentValue = quantity * currentPrice;
-      const profit = quantity > 0 ? currentValue - totalInvested : 0;
-      const profitPercentage = (quantity > 0 && totalInvested > 0) ? (profit / totalInvested) * 100 : 0;
+      const assetIdToCode = new Map<string, string>();
+      (broker.assets || []).forEach(a => assetIdToCode.set(a.id, a.code.trim().toUpperCase()));
 
-      const consolidatedStat = {
-        quantity,
-        totalInvested,
-        avgPrice,
-        currentPrice,
-        currentValue,
-        profit,
-        profitPercentage,
-        boughtQuantity,
-        soldQuantity,
-        quantityCurrentYear,
-        totalInvestedCurrentYear,
-        quantityPreviousYear,
-        totalInvestedPreviousYear
-      };
+      Object.values(assetsByCode).forEach(assetsWithThisCode => {
+        const firstAsset = assetsWithThisCode[0];
+        const code = firstAsset.code.trim().toUpperCase();
+        
+        const transactions = uniqueTransactions
+          .filter(t => t.brokerId === broker.id && assetIdToCode.get(t.assetId) === code)
+          .sort((a, b) => {
+            const dateCompare = (a.date || '').localeCompare(b.date || '');
+            if (dateCompare !== 0) return dateCompare;
+            if (a.type === 'Compra' && b.type === 'Venda') return -1;
+            if (a.type === 'Venda' && b.type === 'Compra') return 1;
+            return 0;
+          });
 
-      // Map this stat to ALL asset IDs in this group for robustness
-      assetsWithThisCode.forEach(a => {
-        stats[a.id] = consolidatedStat;
+        let quantity = 0;
+        let totalInvested = 0;
+        let avgPrice = 0;
+        let boughtQuantity = 0;
+        let soldQuantity = 0;
+        let quantityCurrentYear = 0;
+        let totalInvestedCurrentYear = 0;
+        let quantityPreviousYear = 0;
+        let totalInvestedPreviousYear = 0;
+
+        transactions.forEach(t => {
+          const absQty = Math.abs(t.quantity || 0);
+          const price = t.price || 0;
+          
+          if (t.type === 'Compra') {
+            boughtQuantity += absQty;
+            const newQuantity = quantity + absQty;
+            const newTotalInvested = totalInvested + (absQty * price);
+            quantity = newQuantity;
+            totalInvested = newTotalInvested;
+            avgPrice = quantity > 0 ? totalInvested / quantity : 0;
+          } else {
+            soldQuantity += absQty;
+            if (quantity > 0) {
+              const ratio = (quantity - absQty) / quantity;
+              quantity = Math.max(0, quantity - absQty);
+              totalInvested = quantity > 0 ? totalInvested * ratio : 0;
+            } else {
+              quantity = 0;
+              totalInvested = 0;
+              avgPrice = 0;
+            }
+          }
+
+          if (t.date && t.date <= previousYearEnd) {
+            quantityPreviousYear = quantity;
+            totalInvestedPreviousYear = totalInvested;
+          }
+          if (t.date && t.date <= currentYearEnd) {
+            quantityCurrentYear = quantity;
+            totalInvestedCurrentYear = totalInvested;
+          }
+        });
+
+        const currentPrice = firstAsset.currentPrice || 0;
+        const currentValue = quantity * currentPrice;
+        const profit = quantity > 0 ? currentValue - totalInvested : 0;
+        const profitPercentage = (quantity > 0 && totalInvested > 0) ? (profit / totalInvested) * 100 : 0;
+
+        const consolidatedStat = {
+          quantity,
+          totalInvested,
+          avgPrice,
+          currentPrice,
+          currentValue,
+          profit,
+          profitPercentage,
+          boughtQuantity,
+          soldQuantity,
+          quantityCurrentYear,
+          totalInvestedCurrentYear,
+          quantityPreviousYear,
+          totalInvestedPreviousYear
+        };
+
+        // Map this stat to ALL asset IDs in this group for robustness
+        assetsWithThisCode.forEach(a => {
+          stats[a.id] = consolidatedStat;
+        });
       });
     });
 
     return stats;
-  }, [currentBroker, irpfYear, uniqueTransactions]);
+  }, [data.brokers, irpfYear, uniqueTransactions]);
 
   const formatCurrency = (val: number) => {
     return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val);
   };
 
-  const getBensEDireitosDescription = (asset: Asset, stats: any, calendarYear: number) => {
+  const getBensEDireitosDescription = (asset: Asset, stats: any, calendarYear: number, broker: Broker) => {
     const codes = IRPF_CODES[asset.type] || { group: '99', code: '99' };
     const typeLabel = asset.type === 'Ação' ? 'Ações' : asset.type === 'FII' ? 'Cotas de Fundo de Investimento Imobiliário' : asset.type;
-    const brokerCnpj = currentBroker?.cnpj ? ` (CNPJ: ${currentBroker.cnpj})` : '';
+    const brokerCnpj = broker?.cnpj ? ` (CNPJ: ${broker.cnpj})` : '';
     const assetCnpj = asset.cnpj ? ` (CNPJ: ${asset.cnpj})` : '';
     const nameToUse = asset.corporateName || asset.name;
     
-    return `${stats.quantityCurrentYear.toLocaleString('pt-BR')} ${typeLabel} de ${asset.code} - ${nameToUse}${assetCnpj}, custodiadas na corretora ${currentBroker?.name}${brokerCnpj}. Custo médio de aquisição: ${formatCurrency(stats.avgPrice)}. Situação em 31/12/${calendarYear - 1}: ${formatCurrency(stats.totalInvestedPreviousYear || 0)}. Situação em 31/12/${calendarYear}: ${formatCurrency(stats.totalInvestedCurrentYear || 0)}.`;
+    return `${stats.quantityCurrentYear.toLocaleString('pt-BR')} ${typeLabel} de ${asset.code} - ${nameToUse}${assetCnpj}, custodiadas na corretora ${broker?.name}${brokerCnpj}. Custo médio de aquisição: ${formatCurrency(stats.avgPrice)}. Situação em 31/12/${calendarYear - 1}: ${formatCurrency(stats.totalInvestedPreviousYear || 0)}. Situação em 31/12/${calendarYear}: ${formatCurrency(stats.totalInvestedCurrentYear || 0)}.`;
   };
 
   const allIrpfItems = useMemo(() => {
-    if (!currentBroker) return [];
+    const brokersToProcess = irpfFilterBroker === 'all' 
+      ? data.brokers 
+      : data.brokers.filter(b => b.id === irpfFilterBroker);
     
     const items: any[] = [];
     const calendarYear = parseInt(irpfYear);
-    
-    // Group assets by code for IRPF
-    const uniqueAssetsMap = new Map<string, Asset>();
-    (currentBroker.assets || []).forEach(a => {
-      const code = a.code.trim().toUpperCase();
-      if (!uniqueAssetsMap.has(code)) uniqueAssetsMap.set(code, a);
-    });
-    const uniqueAssets = Array.from(uniqueAssetsMap.values());
-    
-    // 1. Bens e Direitos from Assets
-    uniqueAssets.forEach(asset => {
-      const stats = assetStats[asset.id];
-      if (stats && (stats.quantityCurrentYear > 0 || stats.quantityPreviousYear > 0)) {
-        const codes = IRPF_CODES[asset.type] || { group: '99', code: '99' };
-        items.push({
-          id: `auto-bens-${asset.id}`,
-          topic: 'Bens e Direitos',
-          ficha: 'Bens e Direitos',
-          group: codes.group,
-          code: codes.code,
-          description: getBensEDireitosDescription(asset, stats, calendarYear),
-          value: stats.totalInvestedCurrentYear,
-          previousValue: stats.totalInvestedPreviousYear,
-          cnpj: asset.cnpj || currentBroker.cnpj,
-          guide: `Declare no grupo ${codes.group} e código ${codes.code}. No campo 'Discriminação', informe a quantidade, o nome do ativo, o CNPJ da empresa e a corretora onde estão custodiados.`
-        });
-      }
-    });
-
-    // 2. Rendimentos from Dividends
-    const dividendsByAssetCode: Record<string, { dividend: number; jcp: number }> = {};
     const calendarYearStr = calendarYear.toString();
-    
-    // Map asset IDs to codes for dividend grouping
-    const assetIdToCode = new Map<string, string>();
-    (currentBroker.assets || []).forEach(a => assetIdToCode.set(a.id, a.code.trim().toUpperCase()));
 
-    (currentBroker.dividends || []).forEach(div => {
-      if (div.date.startsWith(calendarYearStr)) {
-        const code = assetIdToCode.get(div.assetId);
-        if (code) {
-          if (!dividendsByAssetCode[code]) {
-            dividendsByAssetCode[code] = { dividend: 0, jcp: 0 };
-          }
-          dividendsByAssetCode[code].dividend += div.dividendValue || 0;
-          dividendsByAssetCode[code].jcp += div.jcpValue || 0;
+    brokersToProcess.forEach(broker => {
+      // Group assets by code for IRPF
+      const uniqueAssetsMap = new Map<string, Asset>();
+      (broker.assets || []).forEach(a => {
+        const code = a.code.trim().toUpperCase();
+        if (!uniqueAssetsMap.has(code)) uniqueAssetsMap.set(code, a);
+      });
+      const uniqueAssets = Array.from(uniqueAssetsMap.values());
+      
+      // 1. Bens e Direitos from Assets
+      uniqueAssets.forEach(asset => {
+        const stats = assetStats[asset.id];
+        if (stats && (stats.quantityCurrentYear > 0 || stats.quantityPreviousYear > 0)) {
+          const codes = IRPF_CODES[asset.type] || { group: '99', code: '99' };
+          items.push({
+            id: `auto-bens-${asset.id}`,
+            brokerId: broker.id,
+            brokerName: broker.name,
+            topic: 'Bens e Direitos',
+            ficha: 'Bens e Direitos',
+            group: codes.group,
+            code: codes.code,
+            description: getBensEDireitosDescription(asset, stats, calendarYear, broker),
+            value: stats.totalInvestedCurrentYear,
+            previousValue: stats.totalInvestedPreviousYear,
+            cnpj: asset.cnpj || broker.cnpj,
+            guide: `Declare no grupo ${codes.group} e código ${codes.code}. No campo 'Discriminação', informe a quantidade, o nome do ativo, o CNPJ da empresa e a corretora onde estão custodiados.`
+          });
         }
-      }
+      });
+
+      // 2. Rendimentos from Dividends
+      const dividendsByAssetCode: Record<string, { dividend: number; jcp: number }> = {};
+      const assetIdToCode = new Map<string, string>();
+      (broker.assets || []).forEach(a => assetIdToCode.set(a.id, a.code.trim().toUpperCase()));
+
+      (broker.dividends || []).forEach(div => {
+        if (div.date.startsWith(calendarYearStr)) {
+          const code = assetIdToCode.get(div.assetId);
+          if (code) {
+            if (!dividendsByAssetCode[code]) {
+              dividendsByAssetCode[code] = { dividend: 0, jcp: 0 };
+            }
+            dividendsByAssetCode[code].dividend += div.dividendValue || 0;
+            dividendsByAssetCode[code].jcp += div.jcpValue || 0;
+          }
+        }
+      });
+
+      Object.entries(dividendsByAssetCode).forEach(([code, values]) => {
+        const asset = uniqueAssets.find(a => a.code.trim().toUpperCase() === code);
+        if (!asset) return;
+
+        if (values.dividend > 0) {
+          const code = asset.type === 'Ação' ? '09' : '26';
+          const nameToUse = asset.corporateName || asset.name;
+          items.push({
+            id: `auto-div-${broker.id}-${asset.id}`,
+            brokerId: broker.id,
+            brokerName: broker.name,
+            topic: 'Rendimentos Isentos',
+            ficha: 'Rendimentos Isentos e Não Tributáveis',
+            code: code,
+            description: `Rendimentos isentos de ${nameToUse} (${asset.code}) - ${broker.name}`,
+            value: values.dividend,
+            cnpj: asset.cnpj || broker.cnpj,
+            guide: `Declare na ficha 'Rendimentos Isentos e Não Tributáveis', sob o código ${code}. Informe o CNPJ da fonte pagadora e o valor total recebido no ano.`
+          });
+        }
+
+        if (values.jcp > 0) {
+          const nameToUse = asset.corporateName || asset.name;
+          items.push({
+            id: `auto-jcp-${broker.id}-${asset.id}`,
+            brokerId: broker.id,
+            brokerName: broker.name,
+            topic: 'Rendimentos Sujeitos à Tributação Exclusiva',
+            ficha: 'Rendimentos Sujeitos à Tributação Exclusiva/Definitiva',
+            code: '10',
+            description: `Juros sobre Capital Próprio de ${nameToUse} (${asset.code}) - ${broker.name}`,
+            value: values.jcp,
+            cnpj: asset.cnpj || broker.cnpj,
+            guide: `Declare na ficha 'Rendimentos Sujeitos à Tributação Exclusiva/Definitiva', sob o código 10. Informe o CNPJ da fonte pagadora e o valor total recebido no ano.`
+          });
+        }
+      });
+
+      // 3. Manual Items
+      (broker.irpfItems || []).forEach(item => {
+        if (item.year === calendarYearStr) {
+          items.push({
+            ...item,
+            brokerId: broker.id,
+            brokerName: broker.name
+          });
+        }
+      });
     });
 
-    Object.entries(dividendsByAssetCode).forEach(([code, values]) => {
-      const asset = uniqueAssets.find(a => a.code.trim().toUpperCase() === code);
-      if (!asset) return;
-
-      if (values.dividend > 0) {
-        const code = asset.type === 'Ação' ? '09' : '26';
-        const nameToUse = asset.corporateName || asset.name;
-        const description = `Rendimentos isentos de ${nameToUse} (${asset.code}) - ${currentBroker.name}`;
-        items.push({
-          id: `auto-div-${asset.id}`,
-          topic: 'Rendimentos Isentos',
-          ficha: 'Rendimentos Isentos e Não Tributáveis',
-          code: code,
-          description: description,
-          value: values.dividend,
-          cnpj: asset.cnpj || currentBroker.cnpj,
-          guide: `Declare na ficha 'Rendimentos Isentos e Não Tributáveis', sob o código ${code}. Informe o CNPJ da fonte pagadora e o valor total recebido no ano.`
-        });
-      }
-
-      if (values.jcp > 0) {
-        const nameToUse = asset.corporateName || asset.name;
-        const description = `Juros sobre Capital Próprio de ${nameToUse} (${asset.code}) - ${currentBroker.name}`;
-        items.push({
-          id: `auto-jcp-${asset.id}`,
-          topic: 'Rendimentos Sujeitos à Tributação Exclusiva',
-          ficha: 'Rendimentos Sujeitos à Tributação Exclusiva/Definitiva',
-          code: '10',
-          description: description,
-          value: values.jcp,
-          cnpj: asset.cnpj || currentBroker.cnpj,
-          guide: `Declare na ficha 'Rendimentos Sujeitos à Tributação Exclusiva/Definitiva', sob o código 10. Informe o CNPJ da fonte pagadora e o valor total recebido no ano.`
-        });
-      }
-    });
-
-    // Merge with manual items
-    const manualItems = currentBroker ? (currentBroker.irpfItems || []) : [];
-    const filteredManualItems = manualItems.filter(item => {
-      // Se o item não tem ano, assume que é do ano atual para não sumir
-      if (!item.year) return true;
-      return item.year === calendarYear.toString();
-    });
-    
-    return [...items, ...filteredManualItems];
-  }, [currentBroker, assetStats, irpfYear]);
+    return items;
+  }, [data.brokers, irpfFilterBroker, irpfYear, assetStats]);
 
   const filteredDividends = useMemo(() => {
-    if (!currentBroker) return [];
     return uniqueDividends.filter(d => {
-      const asset = (currentBroker.assets || []).find(a => a.id === d.assetId);
+      const matchBroker = dividendFilterBroker === 'all' || d.brokerId === dividendFilterBroker;
       const matchAsset = dividendFilterAsset === 'all' || d.assetId === dividendFilterAsset;
+      
+      const broker = data.brokers.find(b => b.id === d.brokerId);
+      const asset = (broker?.assets || []).find(a => a.id === d.assetId);
       const matchType = dividendFilterType === 'all' || asset?.type === dividendFilterType;
       
       const date = d.date ? parseISO(d.date) : null;
@@ -922,9 +943,9 @@ export default function App() {
       const matchYear = dividendFilterYear === 'all' || format(date, 'yyyy') === dividendFilterYear;
       const matchMonth = dividendFilterMonth === 'all' || format(date, 'MM') === dividendFilterMonth;
       
-      return matchAsset && matchType && matchYear && matchMonth;
+      return matchBroker && matchAsset && matchType && matchYear && matchMonth;
     }).sort((a, b) => b.date.localeCompare(a.date));
-  }, [currentBroker, uniqueDividends, dividendFilterAsset, dividendFilterType, dividendFilterYear, dividendFilterMonth]);
+  }, [data.brokers, uniqueDividends, dividendFilterBroker, dividendFilterAsset, dividendFilterType, dividendFilterYear, dividendFilterMonth]);
 
   const filteredDividendsTotals = useMemo(() => {
     return filteredDividends.reduce((acc, curr) => ({
@@ -935,8 +956,6 @@ export default function App() {
   }, [filteredDividends]);
 
   const monthlyTaxData = useMemo(() => {
-    if (!currentBroker) return [];
-    
     const monthlyGains: Record<string, { 
       month: string; 
       stockSales: number; 
@@ -947,15 +966,17 @@ export default function App() {
     }> = {};
 
     const assetAvgPrices: Record<string, { quantity: number; totalInvested: number; avgPrice: number }> = {};
-    const assetIdToCode = new Map<string, string>();
-    (currentBroker.assets || []).forEach(a => assetIdToCode.set(a.id, a.code.trim().toUpperCase()));
+    
+    // Create a global asset lookup
+    const allAssets = data.brokers.flatMap(b => b.assets || []);
 
     // Sort all transactions chronologically
     const allTransactions = [...uniqueTransactions]
       .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
 
     allTransactions.forEach(t => {
-      const asset = (currentBroker.assets || []).find(a => a.id === t.assetId);
+      const broker = data.brokers.find(b => b.id === t.brokerId);
+      const asset = (broker?.assets || []).find(a => a.id === t.assetId);
       if (!asset) return;
 
       const code = asset.code.trim().toUpperCase();
@@ -971,11 +992,13 @@ export default function App() {
         };
       }
 
-      if (!assetAvgPrices[code]) {
-        assetAvgPrices[code] = { quantity: 0, totalInvested: 0, avgPrice: 0 };
+      // Average price should be per broker/asset code
+      const statsKey = `${t.brokerId}-${code}`;
+      if (!assetAvgPrices[statsKey]) {
+        assetAvgPrices[statsKey] = { quantity: 0, totalInvested: 0, avgPrice: 0 };
       }
 
-      const stats = assetAvgPrices[code];
+      const stats = assetAvgPrices[statsKey];
 
       if (t.type === 'Compra') {
         stats.quantity += t.quantity;
@@ -1026,7 +1049,7 @@ export default function App() {
         totalDarf: stockTax + fiiTax + bdrTax + otherTax
       };
     }).sort((a, b) => b.month.localeCompare(a.month));
-  }, [currentBroker]);
+  }, [data.brokers, uniqueTransactions]);
 
   const hasDuplicates = useMemo(() => {
     if (!currentBroker) return false;
@@ -1138,38 +1161,39 @@ export default function App() {
   }, [currentBroker, searchTerm, assetFilterType, sortField, sortDirection, assetStats]);
 
   const filterOptions = useMemo(() => {
-    if (!currentBroker) return { years: [], months: [], days: [] };
     const years = new Set<string>();
     const months = new Set<string>();
     const days = new Set<string>();
     
-    // De transações
-    currentBroker.transactions.forEach(t => {
-      if (!t.date) return;
-      try {
-        const date = parseISO(t.date);
-        if (!isNaN(date.getTime())) {
-          years.add(format(date, 'yyyy'));
-          months.add(format(date, 'MM'));
-          days.add(format(date, 'dd'));
+    data.brokers.forEach(broker => {
+      // De transações
+      (broker.transactions || []).forEach(t => {
+        if (!t.date) return;
+        try {
+          const date = parseISO(t.date);
+          if (!isNaN(date.getTime())) {
+            years.add(format(date, 'yyyy'));
+            months.add(format(date, 'MM'));
+            days.add(format(date, 'dd'));
+          }
+        } catch (e) {
+          console.error('Erro ao formatar data:', t.date, e);
         }
-      } catch (e) {
-        console.error('Erro ao formatar data:', t.date, e);
-      }
-    });
+      });
 
-    // De rendimentos
-    currentBroker.dividends.forEach(d => {
-      if (!d.date) return;
-      try {
-        const date = parseISO(d.date);
-        if (!isNaN(date.getTime())) {
-          years.add(format(date, 'yyyy'));
-          months.add(format(date, 'MM'));
+      // De rendimentos
+      (broker.dividends || []).forEach(d => {
+        if (!d.date) return;
+        try {
+          const date = parseISO(d.date);
+          if (!isNaN(date.getTime())) {
+            years.add(format(date, 'yyyy'));
+            months.add(format(date, 'MM'));
+          }
+        } catch (e) {
+          console.error('Erro ao formatar data:', d.date, e);
         }
-      } catch (e) {
-        console.error('Erro ao formatar data:', d.date, e);
-      }
+      });
     });
     
     return {
@@ -1177,7 +1201,7 @@ export default function App() {
       months: Array.from(months).sort(),
       days: Array.from(days).sort()
     };
-  }, [currentBroker]);
+  }, [data.brokers]);
 
   const showNotify = (message: string, type: 'success' | 'error' = 'success') => {
     setNotification({ message, type });
@@ -2028,14 +2052,15 @@ export default function App() {
       - Extratos de Custódia: Extraia a posição atual (quantidade e preço médio/custo). (Fonte: 'Extrato de Custódia')
       
       REGRAS CRÍTICAS:
-      1. TRANSAÇÕES: Se o documento for um Informe de Rendimentos e mostrar "Situação em 31/12/XXXX", extraia a QUANTIDADE e o CUSTO TOTAL. Converta isso em uma transação de 'Compra' com data de 31/12 daquele ano, usando o preço unitário (Custo Total / Quantidade). Defina o 'source' como 'Informe de Rendimentos'.
-      2. PREÇOS ATUAIS: Se o documento contiver o valor de mercado atual (ex: cotação de fechamento), extraia como 'assetPrices'.
-      3. TAXAS: Em Notas de Corretagem, some todas as taxas (corretagem, emolumentos, ISS) ao valor da compra ou subtraia do valor da venda para obter o PREÇO LÍQUIDO. Defina o 'source' como 'Nota de Corretagem'.
-      4. RENDIMENTOS: Extraia Dividendos e JCP separadamente. Se o valor for "por cota", multiplique pela quantidade ou use o valor total creditado.
-      5. NÃO EXTRAIA TOTAIS: Ignore linhas que mostram "Total da Nota", "Valor Líquido da Nota", "Resumo Financeiro" ou totais de movimentação como se fossem transações individuais. Extraia apenas as operações de compra e venda de ativos específicos.
-      6. TICKERS: Normalize tickers para o formato padrão (ex: PETR4, MXRF11). Se houver um 'F' no final indicando mercado fracionário (ex: PETR4F), mantenha o ticker base (PETR4).
+      1. CORRETORA: Identifique o nome da corretora (ex: XP, BTG, Rico, Clear, NuInvest, etc.).
+      2. TRANSAÇÕES: Se o documento for um Informe de Rendimentos e mostrar "Situação em 31/12/XXXX", extraia a QUANTIDADE e o CUSTO TOTAL. Converta isso em uma transação de 'Compra' com data de 31/12 daquele ano, usando o preço unitário (Custo Total / Quantidade). Defina o 'source' como 'Informe de Rendimentos'.
+      3. PREÇOS ATUAIS: Se o documento contiver o valor de mercado atual (ex: cotação de fechamento), extraia como 'assetPrices'.
+      4. TAXAS: Em Notas de Corretagem, some todas as taxas (corretagem, emolumentos, ISS) ao valor da compra ou subtraia do valor da venda para obter o PREÇO LÍQUIDO. Defina o 'source' como 'Nota de Corretagem'.
+      5. RENDIMENTOS: Extraia Dividendos e JCP separadamente. Se o valor for "por cota", multiplique pela quantidade ou use o valor total creditado.
+      6. NÃO EXTRAIA TOTAIS: Ignore linhas que mostram "Total da Nota", "Valor Líquido da Nota", "Resumo Financeiro" ou totais de movimentação como se fossem transações individuais. Extraia apenas as operações de compra e venda de ativos específicos.
+      7. TICKERS: Normalize tickers para o formato padrão (ex: PETR4, MXRF11). Se houver um 'F' no final indicando mercado fracionário (ex: PETR4F), mantenha o ticker base (PETR4).
       
-      Retorne um objeto JSON com três arrays: "transactions", "dividends" e "assetPrices".
+      Retorne um objeto JSON com quatro campos: "brokerName", "transactions", "dividends" e "assetPrices".
       Certifique-se de que os números sejam decimais puros (ex: 1234.56), sem símbolos de moeda ou separadores de milhar.
       
       Texto do documento:
@@ -2045,6 +2070,7 @@ export default function App() {
         responseSchema: {
           type: Type.OBJECT,
           properties: {
+            brokerName: { type: Type.STRING, description: "Nome da corretora identificada no documento" },
             transactions: {
               type: Type.ARRAY,
               items: {
@@ -2086,13 +2112,13 @@ export default function App() {
               }
             }
           },
-          required: ["transactions", "dividends", "assetPrices"]
+          required: ["brokerName", "transactions", "dividends", "assetPrices"]
         }
       }
     });
 
     try {
-      const result = JSON.parse(response.text || '{"transactions": [], "dividends": [], "assetPrices": []}');
+      const result = JSON.parse(response.text || '{"brokerName": "", "transactions": [], "dividends": [], "assetPrices": []}');
       return result;
     } catch (e) {
       console.error('Erro ao parsear resposta do Gemini:', e, response.text);
@@ -2100,11 +2126,40 @@ export default function App() {
     }
   };
 
-  const processExtractedData = (extracted: { transactions: any[], dividends: any[], assetPrices?: any[] }) => {
-    if (!currentBroker) return;
-
+  const processExtractedData = (extracted: { brokerName?: string, transactions: any[], dividends: any[], assetPrices?: any[] }) => {
     setData(prev => {
-      const broker = prev.brokers.find(b => b.id === prev.currentBrokerId)!;
+      let newBrokers = [...prev.brokers];
+      let targetBrokerId = prev.currentBrokerId;
+      
+      if (extracted.brokerName) {
+        const normalizedBrokerName = extracted.brokerName.trim().toUpperCase();
+        const existingBrokerIdx = newBrokers.findIndex(b => 
+          b.name.trim().toUpperCase().includes(normalizedBrokerName) || 
+          normalizedBrokerName.includes(b.name.trim().toUpperCase())
+        );
+        
+        if (existingBrokerIdx !== -1) {
+          targetBrokerId = newBrokers[existingBrokerIdx].id;
+        } else {
+          const newBroker: Broker = {
+            id: crypto.randomUUID(),
+            name: extracted.brokerName.trim(),
+            cnpj: '',
+            assets: [],
+            transactions: [],
+            dividends: [],
+            irpfItems: [],
+            declaredItemIds: []
+          };
+          newBrokers = [...newBrokers, newBroker];
+          targetBrokerId = newBroker.id;
+        }
+      }
+      
+      const brokerIdx = newBrokers.findIndex(b => b.id === targetBrokerId);
+      if (brokerIdx === -1) return prev;
+      
+      const broker = newBrokers[brokerIdx];
       const newAssets = [...broker.assets];
       const newTransactions = [...broker.transactions];
       const newDividends = [...broker.dividends];
@@ -2237,7 +2292,8 @@ export default function App() {
 
       return {
         ...prev,
-        brokers: prev.brokers.map(b => b.id === broker.id ? {
+        currentBrokerId: targetBrokerId,
+        brokers: newBrokers.map(b => b.id === targetBrokerId ? {
           ...b,
           assets: newAssets,
           transactions: newTransactions,
@@ -2605,98 +2661,82 @@ export default function App() {
     });
   };
 
-  const groupedTransactions: Record<string, Transaction[]> = useMemo(() => {
-    if (!currentBroker) return {};
-    const grouped: Record<string, Transaction[]> = {};
-    [...uniqueTransactions]
-      .filter(t => {
-        if (!t.date) return false;
-        try {
-          const date = parseISO(t.date);
-          if (isNaN(date.getTime())) return false;
-          
-          const year = format(date, 'yyyy');
-          const month = format(date, 'MM');
-          const day = format(date, 'dd');
-          
-          const matchYear = filterYear === 'all' || year === filterYear;
-          const matchMonth = filterMonth === 'all' || month === filterMonth;
-          const matchDay = filterDay === 'all' || day === filterDay;
-          const matchType = filterType === 'all' || t.type === filterType;
-          
-          return matchYear && matchMonth && matchDay && matchType;
-        } catch (e) {
-          return false;
-        }
-      })
-      .sort((a, b) => (b.date || '').localeCompare(a.date || ''))
-      .forEach(t => {
-        try {
-          const date = parseISO(t.date);
-          if (isNaN(date.getTime())) return;
-          const month = format(date, 'MMMM yyyy', { locale: ptBR });
-          if (!grouped[month]) grouped[month] = [];
-          grouped[month].push(t);
-        } catch (e) {}
-      });
+  const filteredTransactions = useMemo(() => {
+    return uniqueTransactions.filter(t => {
+      const matchBroker = transactionFilterBroker === 'all' || t.brokerId === transactionFilterBroker;
+      const matchAsset = transactionFilterAsset === 'all' || t.assetId === transactionFilterAsset;
+      const matchType = transactionFilterType === 'all' || t.type === transactionFilterType;
+      
+      const date = t.date ? parseISO(t.date) : null;
+      if (!date || !isValid(date)) return false;
+      
+      const matchYear = transactionFilterYear === 'all' || format(date, 'yyyy') === transactionFilterYear;
+      const matchMonth = transactionFilterMonth === 'all' || format(date, 'MM') === transactionFilterMonth;
+      const matchDay = transactionFilterDay === 'all' || format(date, 'dd') === transactionFilterDay;
+      
+      return matchBroker && matchAsset && matchType && matchYear && matchMonth && matchDay;
+    }).sort((a, b) => b.date.localeCompare(a.date));
+  }, [uniqueTransactions, transactionFilterBroker, transactionFilterAsset, transactionFilterType, transactionFilterYear, transactionFilterMonth, transactionFilterDay]);
+
+  const groupedTransactions: Record<string, (Transaction & { brokerName: string; brokerId: string })[]> = useMemo(() => {
+    const grouped: Record<string, (Transaction & { brokerName: string; brokerId: string })[]> = {};
+    filteredTransactions.forEach(t => {
+      try {
+        const date = parseISO(t.date);
+        if (isNaN(date.getTime())) return;
+        const month = format(date, 'MMMM yyyy', { locale: ptBR });
+        if (!grouped[month]) grouped[month] = [];
+        grouped[month].push(t);
+      } catch (e) {}
+    });
     return grouped;
-  }, [uniqueTransactions, filterYear, filterMonth, filterDay, filterType]);
+  }, [filteredTransactions]);
 
   const transactionTotals = useMemo(() => {
-    if (!currentBroker) return { buy: 0, sell: 0, volume: 0, net: 0, costOfSales: 0, realizedProfit: 0 };
-    
     const assetStates: Record<string, { quantity: number; totalInvested: number }> = {};
-    const assetIdToCode = new Map<string, string>();
-    (currentBroker.assets || []).forEach(a => assetIdToCode.set(a.id, a.code.trim().toUpperCase()));
-
+    
     let buy = 0;
     let sell = 0;
     let costOfSales = 0;
     let realizedProfit = 0;
 
-    uniqueTransactions.forEach(t => {
-      const code = assetIdToCode.get(t.assetId);
-      if (!code) return; 
+    // We need to process ALL transactions in chronological order to calculate realized profit correctly
+    // but only sum the ones that match the current filter
+    const allTransactions = [...uniqueTransactions].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+
+    allTransactions.forEach(t => {
+      const broker = data.brokers.find(b => b.id === t.brokerId);
+      const asset = (broker?.assets || []).find(a => a.id === t.assetId);
+      if (!asset) return;
+
+      const code = asset.code.trim().toUpperCase();
+      const statsKey = `${t.brokerId}-${code}`;
       
-      if (!assetStates[code]) assetStates[code] = { quantity: 0, totalInvested: 0 };
-      const state = assetStates[code];
+      if (!assetStates[statsKey]) assetStates[statsKey] = { quantity: 0, totalInvested: 0 };
+      const state = assetStates[statsKey];
       
       const absQty = Math.abs(t.quantity || 0);
       const price = t.price || 0;
       const value = absQty * price;
       
-      let passesFilter = false;
-      try {
-        const date = t.date ? parseISO(t.date) : null;
-        if (date && isValid(date)) {
-          const year = format(date, 'yyyy');
-          const month = format(date, 'MM');
-          const day = format(date, 'dd');
-          const matchYear = filterYear === 'all' || year === filterYear;
-          const matchMonth = filterMonth === 'all' || month === filterMonth;
-          const matchDay = filterDay === 'all' || day === filterDay;
-          const matchType = filterType === 'all' || t.type === filterType;
-          const matchSource = filterSource === 'all' || (t.source || 'Manual') === filterSource;
-          passesFilter = matchYear && matchMonth && matchDay && matchType && matchSource;
-        }
-      } catch(e) {}
+      const isFiltered = filteredTransactions.some(ft => ft.id === t.id);
 
       if (t.type === 'Compra') {
-        if (passesFilter) buy += value;
-        state.totalInvested += value;
+        if (isFiltered) buy += value;
         state.quantity += absQty;
+        state.totalInvested += value;
       } else {
+        if (isFiltered) sell += value;
+        
         const avgPrice = state.quantity > 0 ? state.totalInvested / state.quantity : 0;
         const currentCostOfSale = absQty * avgPrice;
         const currentProfit = value - currentCostOfSale;
-
-        if (passesFilter) {
-          sell += value;
+        
+        if (isFiltered) {
           costOfSales += currentCostOfSale;
           realizedProfit += currentProfit;
         }
 
-        // Update state (cost basis reduction)
         if (state.quantity > 0) {
           const ratio = (state.quantity - absQty) / state.quantity;
           state.quantity = Math.max(0, state.quantity - absQty);
@@ -2708,18 +2748,15 @@ export default function App() {
       }
     });
 
-    // Calculate total equity at cost (sum of all remaining invested amounts)
-    const totalEquityAtCost = Object.values(assetStates).reduce((acc, curr) => acc + curr.totalInvested, 0);
-
     return { 
       buy, 
       sell, 
+      volume: buy + sell, 
+      net: buy - sell, 
       costOfSales, 
-      realizedProfit, 
-      net: totalEquityAtCost,
-      volume: buy + sell 
+      realizedProfit 
     };
-  }, [uniqueTransactions, filterYear, filterMonth, filterDay, filterType, currentBroker]);
+  }, [data.brokers, uniqueTransactions, filteredTransactions]);
 
   // --- Chart Data ---
 
@@ -3255,16 +3292,40 @@ export default function App() {
                       <RefreshCw className="w-4 h-4 mr-2" /> Consolidar
                     </Button>
                     <select 
-                      value={filterYear} 
-                      onChange={(e) => setFilterYear(e.target.value)}
+                      value={transactionFilterBroker} 
+                      onChange={(e) => setTransactionFilterBroker(e.target.value)}
+                      className="bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                    >
+                      <option value="all">Todas as Corretoras</option>
+                      {data.brokers.map(b => (
+                        <option key={b.id} value={b.id}>{b.name}</option>
+                      ))}
+                    </select>
+                    <select 
+                      value={transactionFilterAsset} 
+                      onChange={(e) => setTransactionFilterAsset(e.target.value)}
+                      className="bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                    >
+                      <option value="all">Todos os Ativos</option>
+                      {Array.from(new Set(uniqueTransactions.map(t => t.assetId))).map(assetId => {
+                        const broker = data.brokers.find(b => b.assets.some(a => a.id === assetId));
+                        const asset = broker?.assets.find(a => a.id === assetId);
+                        return asset ? (
+                          <option key={assetId} value={assetId}>{asset.code}</option>
+                        ) : null;
+                      })}
+                    </select>
+                    <select 
+                      value={transactionFilterYear} 
+                      onChange={(e) => setTransactionFilterYear(e.target.value)}
                       className="bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                     >
                       <option value="all">Todos os Anos</option>
                       {filterOptions.years.map(y => <option key={y} value={y}>{y}</option>)}
                     </select>
                     <select 
-                      value={filterMonth} 
-                      onChange={(e) => setFilterMonth(e.target.value)}
+                      value={transactionFilterMonth} 
+                      onChange={(e) => setTransactionFilterMonth(e.target.value)}
                       className="bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                     >
                       <option value="all">Todos os Meses</option>
@@ -3281,16 +3342,16 @@ export default function App() {
                       })}
                     </select>
                     <select 
-                      value={filterDay} 
-                      onChange={(e) => setFilterDay(e.target.value)}
+                      value={transactionFilterDay} 
+                      onChange={(e) => setTransactionFilterDay(e.target.value)}
                       className="bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                     >
                       <option value="all">Todos os Dias</option>
                       {filterOptions.days.map(d => <option key={d} value={d}>{d}</option>)}
                     </select>
                     <select 
-                      value={filterType} 
-                      onChange={(e) => setFilterType(e.target.value)}
+                      value={transactionFilterType} 
+                      onChange={(e) => setTransactionFilterType(e.target.value)}
                       className="bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                     >
                       <option value="all">Todos os Tipos</option>
@@ -3298,8 +3359,8 @@ export default function App() {
                       <option value="Venda">Apenas Vendas</option>
                     </select>
                     <select 
-                      value={filterSource} 
-                      onChange={(e) => setFilterSource(e.target.value)}
+                      value={transactionFilterSource} 
+                      onChange={(e) => setTransactionFilterSource(e.target.value)}
                       className="bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                     >
                       <option value="all">Todas as Fontes</option>
@@ -3323,16 +3384,16 @@ export default function App() {
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
                 <Card className="p-4 bg-blue-50 border-blue-100">
                   <p className="text-xs font-bold text-blue-600 uppercase tracking-wider mb-1">
-                    {filterYear === 'all' && filterMonth === 'all' ? 'Total de Compras' : 'Compras no Período'}
+                    {transactionFilterYear === 'all' && transactionFilterMonth === 'all' ? 'Total de Compras' : 'Compras no Período'}
                   </p>
                   <p className="text-xl font-bold text-blue-900">{formatCurrency(transactionTotals.buy)}</p>
                 </Card>
                 <Card className="p-4 bg-red-50 border-red-100">
                   <p className="text-xs font-bold text-red-600 uppercase tracking-wider mb-1">
-                    {filterYear === 'all' && filterMonth === 'all' ? 'Custo das Vendas (Baixas)' : 'Vendas no Período'}
+                    {transactionFilterYear === 'all' && transactionFilterMonth === 'all' ? 'Custo das Vendas (Baixas)' : 'Vendas no Período'}
                   </p>
                   <p className="text-xl font-bold text-red-900">
-                    {filterYear === 'all' && filterMonth === 'all' 
+                    {transactionFilterYear === 'all' && transactionFilterMonth === 'all' 
                       ? formatCurrency(transactionTotals.costOfSales) 
                       : formatCurrency(transactionTotals.sell)}
                   </p>
@@ -3343,10 +3404,10 @@ export default function App() {
                 </Card>
                 <Card className="p-4 bg-indigo-50 border-indigo-100">
                   <p className="text-xs font-bold text-indigo-600 uppercase tracking-wider mb-1">
-                    {filterYear === 'all' && filterMonth === 'all' ? 'Patrimônio (Custo)' : 'Saldo do Período'}
+                    {transactionFilterYear === 'all' && transactionFilterMonth === 'all' ? 'Patrimônio (Custo)' : 'Saldo do Período'}
                   </p>
                   <p className="text-xl font-bold text-indigo-900">
-                    {filterYear === 'all' && filterMonth === 'all' 
+                    {transactionFilterYear === 'all' && transactionFilterMonth === 'all' 
                       ? formatCurrency(transactionTotals.net) 
                       : formatCurrency(transactionTotals.buy - transactionTotals.sell)}
                   </p>
@@ -3426,6 +3487,16 @@ export default function App() {
                 </div>
                 <div className="flex flex-wrap gap-2 w-full sm:w-auto">
                   <select 
+                    value={dividendFilterBroker} 
+                    onChange={(e) => setDividendFilterBroker(e.target.value)}
+                    className="bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 flex-1 sm:flex-none"
+                  >
+                    <option value="all">Todas as Corretoras</option>
+                    {data.brokers.map(b => (
+                      <option key={b.id} value={b.id}>{b.name}</option>
+                    ))}
+                  </select>
+                  <select 
                     value={dividendFilterYear} 
                     onChange={(e) => setDividendFilterYear(e.target.value)}
                     className="bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 flex-1 sm:flex-none"
@@ -3459,8 +3530,9 @@ export default function App() {
                     className="bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 flex-1 sm:flex-none"
                   >
                     <option value="all">Todos os Ativos</option>
-                    {(currentBroker?.assets || [])
+                    {data.brokers.flatMap(b => b.assets)
                       .filter(asset => dividendFilterType === 'all' || asset.type === dividendFilterType)
+                      .filter((asset, index, self) => self.findIndex(a => a.code === asset.code) === index)
                       .map(asset => (
                         <option key={asset.id} value={asset.id}>{asset.code} - {asset.name}</option>
                       ))}
@@ -3889,7 +3961,7 @@ export default function App() {
                                     <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Discriminação para Bens e Direitos (IRPF)</p>
                                   </div>
                                   <p className="text-sm text-slate-600 leading-relaxed italic">
-                                    "{getBensEDireitosDescription(asset, stats, parseInt(irpfYear))}"
+                                    "{getBensEDireitosDescription(asset, stats, parseInt(irpfYear), currentBroker!)}"
                                   </p>
                                 </div>
                               </div>
@@ -3914,6 +3986,16 @@ export default function App() {
                     <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
                 <h2 className="text-2xl font-bold text-slate-900">Relatório para IRPF</h2>
                 <div className="flex flex-wrap gap-2 no-print w-full md:w-auto">
+                  <select 
+                    value={irpfFilterBroker} 
+                    onChange={(e) => setIrpfFilterBroker(e.target.value)}
+                    className="bg-white border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  >
+                    <option value="all">Todas as Corretoras</option>
+                    {data.brokers.map(b => (
+                      <option key={b.id} value={b.id}>{b.name}</option>
+                    ))}
+                  </select>
                   <select 
                     value={irpfYear} 
                     onChange={(e) => setIrpfYear(e.target.value)}
